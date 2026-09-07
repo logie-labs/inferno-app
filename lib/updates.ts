@@ -11,9 +11,13 @@
  *
  * Two rules run through all of it:
  *
- * 1. **Never claim a version is fine.** Anything with no source to compare
- *    against reports `unknown` or `bundled`, never `current`. A tick nobody
- *    earned is worse than no tick.
+ * 1. **Never invent a comparison.** `current` means a version was actually
+ *    measured against a published release and found equal or newer. Anything
+ *    without a release to ask about gets a state that says so - `bundled`,
+ *    `pinned`, `unknown` - and never `current`. What the screen then *calls*
+ *    those is its own business (they read as "Up to date", because none of
+ *    them needs anybody to do anything), but the distinction survives in the
+ *    data, where the report and the dialog rely on it.
  * 2. **The network is optional.** Every component still reports what is
  *    installed with no connection at all; the remote half only adds the
  *    "and the latest is..." column.
@@ -41,19 +45,17 @@ export type UpdateComponentId =
 /**
  * What the check was able to conclude about one component.
  *
- * The distinction that shapes the whole screen is `bundled` against everything
- * else. `bundled` means the thing is sealed inside the installer: it is
- * present, its version is known, and it moves when the app moves, so it can
- * never be behind on its own. Those rows are the ones worth folding away -
- * updating the app updates all of them at once.
+ * `current`, `outdated` and `error` are the three that come from actually
+ * asking somebody: a release was fetched, or the fetch failed.
  *
- * `pinned` is the opposite and looks deceptively similar: also installed, also
- * not compared against anything, but resolved from PATH or an environment
- * variable rather than the bundle. Updating the app will not touch it, so it
- * stays in view.
- *
- * `bundled` is deliberately not `current`, which is reserved for "compared
- * against a published release and found equal or newer".
+ * `bundled` and `pinned` are the ones where nothing was asked, because there
+ * is nobody to ask. Both mean "installed, working, no known newer version",
+ * and the screen shows them identically for that reason. They stay separate
+ * here because the app can replace one and not the other: `bundled` is sealed
+ * into the installer and moves when the app moves, while `pinned` came from
+ * PATH or an environment variable and will still be sitting there, at that
+ * version, after an update. That difference decides which rows the app's own
+ * row can account for, and which have to stay in view on their own.
  */
 export type UpdateState =
   | "current"
@@ -115,10 +117,13 @@ export function parseVersion(
     return null
   }
 
-  // A leading "v" is GitHub tag decoration; ffmpeg's own tags use "n".
+  // A leading "v" is GitHub tag decoration; ffmpeg's own tags use "n". Only
+  // when a digit follows, so an ffmpeg git build - "N-126308-gd411d9e752" -
+  // keeps its leading letter and is rejected below as the non-version it is,
+  // rather than being quietly shortened into something that looks parseable.
   const text = String(raw)
     .trim()
-    .replace(/^[vn]\.?/i, "")
+    .replace(/^[vn](?=\d)/i, "")
   const core = /^\d+(?:\.\d+)*/.exec(text)?.[0]
 
   if (!core) {
@@ -815,12 +820,13 @@ export function missingComponents(report: UpdateReport | null) {
 }
 
 /**
- * The rows sealed into the installer, which the screen folds away.
+ * The rows sealed into the installer, which the screen keeps behind the app.
  *
  * They are not unimportant - they are the answer to "what am I actually
  * running" - but not one of them can be acted on separately, so listing them
- * beside the app's own row only buries it. Updating the app updates all of
- * these, which is exactly why they are worth one line rather than six.
+ * beside the app's own row only buries it. The Updates screen shows them by
+ * opening the app's row instead, which is the question they answer: these are
+ * what the app *is*, and updating it updates all of them at once.
  */
 export function bundledComponents(report: UpdateReport | null) {
   return report?.components.filter((entry) => entry.state === "bundled") ?? []
@@ -831,25 +837,84 @@ export function trackedComponents(report: UpdateReport | null) {
   return report?.components.filter((entry) => entry.state !== "bundled") ?? []
 }
 
+/** The shape `versionReport` produces. Stable enough to parse. */
+export type VersionReport = {
+  report: "inferno-app version report"
+  /** Schema version, so a reader can tell an old paste from a new one. */
+  schema: 1
+  /** When the report was written out. */
+  generatedAt: string
+  /** When the check it describes actually ran. */
+  checkedAt: string
+  feed: FeedKind
+  environment: {
+    /** Identifies the webview, which is half of any UI bug report. */
+    userAgent: string | null
+  }
+  summary: {
+    components: number
+    outdated: number
+    missing: number
+    failed: number
+    bundled: number
+  }
+  components: Array<{
+    id: UpdateComponentId
+    name: string
+    state: UpdateState
+    current: string | null
+    latest: string | null
+    message: string | null
+    path: string | null
+  }>
+}
+
 /**
- * Every version as plain text, for pasting into a bug report.
+ * The whole check as JSON, for pasting into a bug report.
  *
- * The bundled rows are in here even though the screen hides them: the moment
- * somebody is reporting a problem, "what exactly are you running" is the whole
- * question, and that is a different audience from someone glancing at whether
- * they need to update.
+ * JSON rather than prose because the audience is a maintainer reading somebody
+ * else's install: it survives being quoted, it can be diffed against another
+ * report, and nothing in it has to be guessed at from a sentence.
+ *
+ * Every component is here, the bundled ones included - the screen keeps those
+ * behind the app's row, but "what exactly are you running" is the whole
+ * question the moment something is broken, and that is a different audience
+ * from somebody glancing at whether they need to update.
+ *
+ * `purpose` and `url` are left out on purpose: both are fixed UI copy that
+ * would be identical in every report ever pasted, and would bury the handful
+ * of fields that actually differ between two machines.
  */
-export function versionReport(report: UpdateReport) {
-  const lines = report.components.map((entry) => {
-    const latest = entry.latest ? ` (latest ${entry.latest})` : ""
+export function versionReport(report: UpdateReport, feed: FeedKind): string {
+  const payload: VersionReport = {
+    report: "inferno-app version report",
+    schema: 1,
+    generatedAt: new Date().toISOString(),
+    checkedAt: new Date(report.checkedAt).toISOString(),
+    feed,
+    environment: {
+      userAgent:
+        typeof navigator === "undefined" ? null : (navigator.userAgent ?? null),
+    },
+    summary: {
+      components: report.components.length,
+      outdated: outdatedComponents(report).length,
+      missing: missingComponents(report).length,
+      failed: failedComponents(report).length,
+      bundled: bundledComponents(report).length,
+    },
+    components: report.components.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      state: entry.state,
+      current: entry.current,
+      latest: entry.latest,
+      message: entry.message,
+      path: entry.path,
+    })),
+  }
 
-    return `${entry.name}: ${entry.current ?? "unknown"}${latest} [${entry.state}]`
-  })
-
-  return [
-    `inferno-app version report - ${new Date(report.checkedAt).toISOString()}`,
-    ...lines,
-  ].join("\n")
+  return JSON.stringify(payload, null, 2)
 }
 
 // --- the stored result, and who is listening -------------------------------

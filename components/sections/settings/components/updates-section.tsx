@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 
 import {
-  RiArrowDownSLine,
+  RiArrowRightSLine,
   RiCheckLine,
   RiCloseCircleLine,
   RiErrorWarningLine,
@@ -11,7 +11,6 @@ import {
   RiFileCopyLine,
   RiFolderOpenLine,
   RiLoopRightLine,
-  RiPushpinLine,
   RiQuestionLine,
   RiRefreshLine,
 } from "@remixicon/react"
@@ -20,10 +19,15 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import {
@@ -54,40 +58,71 @@ import type { SettingsSectionComponentProps } from "../settings-config"
 import { SettingsPanel, SettingsToggle } from "./settings-primitives"
 
 /**
- * How each state is worn.
+ * The badge, which answers one question: does this need me to do anything?
  *
- * `current` and `pinned` are deliberately quiet. The point of the screen is
- * that the row needing attention is the one you see first, and a column of
- * ticks would bury it - so only trouble is coloured.
+ * Status only. Where a copy came from - the bundle, your PATH, an environment
+ * variable - is not a status, and wearing it as one made two rows that need
+ * nothing look like two different kinds of thing. That belongs under the
+ * version, where `versionNote` puts it.
+ *
+ * So `bundled` and `pinned` read the same as `current`: present, working, and
+ * nothing known to be newer. They are still separate underneath, because the
+ * app can replace one and not the other, and the dialog behind the app's row
+ * is built on exactly that difference.
+ *
+ * Each status owns a colour, and both places it appears - the badge and the
+ * box's left edge - are driven from the one entry here. Three tiers rather
+ * than a spectrum: green is settled, amber wants you eventually, red is
+ * broken now. An update and a missing ffmpeg are deliberately not the same
+ * colour, because only one of them has stopped downloads working.
  */
-const STATE_STYLE: Record<
-  UpdateState,
-  {
-    label: string
-    variant: "default" | "secondary" | "destructive" | "ghost"
-    className?: string
-    icon: typeof RiCheckLine
-  }
-> = {
-  current: { label: "Up to date", variant: "secondary", icon: RiCheckLine },
+type StatusStyle = {
+  label: string
+  /** The badge's colour, and the colour of anything explaining it. */
+  tone: string
+  /** The same colour on the box's left edge, so a row reads at a glance. */
+  edge: string
+  icon: typeof RiCheckLine
+}
+
+/** Present, working, nothing known to be newer - however that was arrived at. */
+const SETTLED = {
+  label: "Up to date",
+  tone: "text-success",
+  edge: "border-l-success",
+  icon: RiCheckLine,
+} satisfies StatusStyle
+
+const STATE_STYLE: Record<UpdateState, StatusStyle> = {
+  current: SETTLED,
+  bundled: SETTLED,
+  pinned: SETTLED,
   outdated: {
     label: "Update available",
-    variant: "default",
-    className: "text-primary",
+    // Amber rather than the app's red: an update is something to get round to,
+    // and saying it in the same colour as a missing ffmpeg would make the two
+    // look equally urgent when only one of them stops downloads working.
+    tone: "text-warning",
+    edge: "border-l-warning",
     icon: RiLoopRightLine,
   },
-  bundled: { label: "Bundled", variant: "secondary", icon: RiCheckLine },
-  pinned: { label: "Pinned", variant: "ghost", icon: RiPushpinLine },
   unavailable: {
     label: "Missing",
-    variant: "destructive",
+    tone: "text-destructive",
+    edge: "border-l-destructive",
     icon: RiCloseCircleLine,
   },
-  unknown: { label: "Unknown", variant: "ghost", icon: RiQuestionLine },
   error: {
     label: "Check failed",
-    variant: "destructive",
+    tone: "text-destructive",
+    edge: "border-l-destructive",
     icon: RiErrorWarningLine,
+  },
+  unknown: {
+    label: "Unknown",
+    tone: "text-muted-foreground",
+    edge: "border-l-border",
+    icon: RiQuestionLine,
   },
 }
 
@@ -119,7 +154,7 @@ function versionNote(report: ComponentReport) {
 }
 
 /**
- * How loudly a row's message is said, or null for a row that needs no saying.
+ * Whether a row's message is worth printing, and in the badge's own colour.
  *
  * The states left out are the settled ones - current, bundled, pinned. Their
  * messages are true but unremarkable ("Shipped with the app."), and printing
@@ -129,7 +164,7 @@ function versionNote(report: ComponentReport) {
 function messageTone(state: UpdateState) {
   switch (state) {
     case "outdated":
-      return "text-primary"
+      return STATE_STYLE.outdated.tone
     case "unavailable":
     case "error":
       return "text-destructive"
@@ -157,27 +192,33 @@ function GroupHeading({ title, note }: { title: string; note?: string }) {
   )
 }
 
-/** One component: what it is, what version it is, and what to do about it. */
-function ComponentRow({ report }: { report: ComponentReport }) {
+/**
+ * The shell every row shares: a one-pixel border with a heavier left edge
+ * carrying the row's status colour.
+ *
+ * The weight is what makes the colour legible - at one pixel a green edge and
+ * a grey one are the same edge from a normal viewing distance. The summary
+ * band above uses the same pair of widths for the same reason.
+ *
+ * Shared so the app's row - which is a button, because opening it says what is
+ * inside the install - sits on exactly the same line as the rows that are not.
+ */
+const ROW_SHELL =
+  "flex flex-col gap-2 border bg-muted/20 p-3 @xl:flex-row @xl:items-center @xl:gap-4"
+
+/** Everything in a row except what it does when you press it. */
+function RowBody({ report }: { report: ComponentReport }) {
   const style = STATE_STYLE[report.state]
   const Icon = style.icon
   const note = versionNote(report)
   const tone = messageTone(report.state)
-  // Bound here so each handler closes over a string rather than a property
-  // TypeScript cannot promise is still there when it runs.
-  const releases = report.url
-  const location = report.path
 
-  // An even one-pixel border, like every other box on the settings screen. A
-  // thicker edge on one side made each row look like a quotation and set it
-  // out of line with its neighbours; the badge and the coloured message
-  // already say which row needs somebody.
   return (
-    <div className="flex flex-col gap-2 border bg-muted/20 p-3 @xl:flex-row @xl:items-center @xl:gap-4">
-      <div className="min-w-0 flex-1">
+    <>
+      <div className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">{report.name}</span>
-          <Badge variant={style.variant} className={style.className}>
+          <Badge className={style.tone}>
             <Icon data-icon="inline-start" />
             {style.label}
           </Badge>
@@ -206,13 +247,27 @@ function ComponentRow({ report }: { report: ComponentReport }) {
           <div
             className={cn(
               "truncate text-[10px] tracking-widest text-muted-foreground uppercase",
-              report.state === "outdated" && "text-primary"
+              report.state === "outdated" && style.tone
             )}
           >
             {note}
           </div>
         ) : null}
       </div>
+    </>
+  )
+}
+
+/** One component: what it is, what version it is, and what to do about it. */
+function ComponentRow({ report }: { report: ComponentReport }) {
+  // Bound here so each handler closes over a string rather than a property
+  // TypeScript cannot promise is still there when it runs.
+  const releases = report.url
+  const location = report.path
+
+  return (
+    <div className={cn(ROW_SHELL, STATE_STYLE[report.state].edge)}>
+      <RowBody report={report} />
 
       {/* One action, as an icon. The left column is narrow once the panel
           splits in two, and a labelled button here cost more width than the
@@ -243,6 +298,134 @@ function ComponentRow({ report }: { report: ComponentReport }) {
           // whether or not a row has anything to press.
           <span aria-hidden className="size-7" />
         )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The app's row, which opens onto what is sealed inside it.
+ *
+ * The whole row is the trigger rather than an icon at the end of it: the app
+ * *is* its dependencies, so "what am I running" is the natural second question
+ * about this row and not a separate feature hiding behind a control.
+ *
+ * A `<button>` for that reason, which is also why the release link moved into
+ * the dialog - a button inside a button is not a thing, and burying the link
+ * one press deeper costs nothing next to making the row itself pressable.
+ */
+function AppRow({
+  report,
+  inside,
+}: {
+  report: ComponentReport
+  inside: ComponentReport[]
+}) {
+  const releases = report.url
+
+  return (
+    <Dialog>
+      <DialogTrigger
+        render={
+          <button
+            type="button"
+            className={cn(
+              ROW_SHELL,
+              STATE_STYLE[report.state].edge,
+              "w-full cursor-pointer text-left transition-colors outline-none",
+              "hover:bg-muted/40 focus-visible:bg-muted/40"
+            )}
+          />
+        }
+      >
+        <RowBody report={report} />
+        <div className="flex shrink-0 items-center justify-end">
+          <RiArrowRightSLine
+            aria-hidden
+            className="size-4 text-muted-foreground"
+          />
+        </div>
+      </DialogTrigger>
+
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Inside {report.name}</DialogTitle>
+          <DialogDescription>
+            The app and everything sealed into this install. None of it updates
+            on its own - all of it moves when the app does.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[50vh] overflow-y-auto">
+          <InsideRow report={report} />
+          {inside.length > 0 ? (
+            inside.map((entry) => <InsideRow key={entry.id} report={entry} />)
+          ) : (
+            <p className="py-2 text-xs text-muted-foreground">
+              Nothing else could be read. The service reports what is bundled,
+              and it is not running.
+            </p>
+          )}
+        </div>
+
+        <DialogFooter>
+          {releases ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void openUrl(releases).catch((error: unknown) => {
+                  toast.error(describeError(error))
+                })
+              }}
+            >
+              <RiExternalLinkLine
+                data-icon="inline-start"
+                className="size-3.5"
+              />
+              Releases
+            </Button>
+          ) : null}
+          <DialogClose
+            render={
+              <Button variant="secondary" size="sm">
+                Close
+              </Button>
+            }
+          />
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** One line of the "what is inside" list: name, what it is, what version. */
+function InsideRow({ report }: { report: ComponentReport }) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-b py-2 last:border-b-0">
+      <div className="min-w-0">
+        <div className="font-mono text-xs font-medium">{report.name}</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">{report.purpose}</p>
+      </div>
+      <div className="shrink-0 text-right">
+        <div
+          className={cn(
+            "font-mono text-xs",
+            !report.current && "text-muted-foreground"
+          )}
+        >
+          {report.current ?? "no version"}
+        </div>
+        {report.latest ? (
+          <div
+            className={cn(
+              "text-[10px] tracking-widest text-muted-foreground uppercase",
+              report.state === "outdated" && STATE_STYLE.outdated.tone
+            )}
+          >
+            Latest {report.latest}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -301,7 +484,6 @@ function Summary({ report }: { report: UpdateReport | null }) {
 
   // Ordered by what somebody would want to be told first: a missing ffmpeg
   // breaks downloads today, where an available update does not.
-  const trouble = missing.length > 0 || behind.length > 0
   const headline = !report
     ? "Nothing has been checked yet."
     : missing.length > 0
@@ -318,19 +500,31 @@ function Summary({ report }: { report: UpdateReport | null }) {
         ? "Updating the app brings everything sealed inside it along too."
         : "Nothing is behind."
 
-  const Icon = trouble
-    ? missing.length > 0
-      ? RiCloseCircleLine
-      : RiLoopRightLine
-    : RiCheckLine
+  // The band wears the worst status on the screen, in the same colours the
+  // rows below it use, so the top of the page and the row it is about are
+  // never two different-looking claims about one install.
+  const status = !report
+    ? STATE_STYLE.unknown
+    : missing.length > 0
+      ? STATE_STYLE.unavailable
+      : behind.length > 0
+        ? STATE_STYLE.outdated
+        : STATE_STYLE.current
+
+  const Icon = report ? status.icon : RiQuestionLine
 
   return (
-    <div className="flex flex-col gap-4 border bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between">
+    <div
+      className={cn(
+        "flex flex-col gap-4 border bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between",
+        status.edge
+      )}
+    >
       <div className="flex min-w-0 items-start gap-2">
         <Icon
           className={cn(
             "mt-0.5 size-4 shrink-0",
-            trouble ? "text-primary" : "text-muted-foreground"
+            report ? status.tone : "text-muted-foreground"
           )}
         />
         <div className="min-w-0">
@@ -420,12 +614,6 @@ export function UpdatesSection({
   const preferences = config.updates
   const { report, checking } = useUpdateCheck()
 
-  // The bundled rows fold away because not one of them can be acted on: they
-  // arrive with the app and leave with it. Kept collapsed rather than dropped,
-  // because "what am I actually running" is a real question - just not the one
-  // this screen is for.
-  const [showBundled, setShowBundled] = useState(false)
-
   // "4 minutes ago" stops being true while somebody reads it, so the line is
   // re-rendered on a slow tick rather than only when the report changes.
   const [, setTick] = useState(0)
@@ -481,8 +669,12 @@ export function UpdatesSection({
     }
 
     void navigator.clipboard
-      .writeText(versionReport(report))
-      .then(() => toast.success("Version report copied"))
+      .writeText(versionReport(report, describeFeed(preferences.feedUrl)))
+      .then(() =>
+        toast.success("Version report copied", {
+          description: "JSON, ready to paste into an issue.",
+        })
+      )
       .catch(() => toast.error("Could not copy to the clipboard."))
   }
 
@@ -533,7 +725,7 @@ export function UpdatesSection({
                   }
                 />
                 {app.map((entry) => (
-                  <ComponentRow key={entry.id} report={entry} />
+                  <AppRow key={entry.id} report={entry} inside={bundled} />
                 ))}
 
                 {external.length > 0 ? (
@@ -547,50 +739,12 @@ export function UpdatesSection({
                     ))}
                   </>
                 ) : null}
-
-                {bundled.length > 0 ? (
-                  <Collapsible
-                    open={showBundled}
-                    onOpenChange={setShowBundled}
-                    className="mt-1"
-                  >
-                    <CollapsibleTrigger
-                      render={
-                        <button
-                          type="button"
-                          className="flex w-full items-center justify-between gap-3 border bg-muted/20 p-3 text-left transition-colors outline-none hover:bg-muted/40 focus-visible:bg-muted/40"
-                        />
-                      }
-                    >
-                      <span className="min-w-0">
-                        <span className="block text-sm font-medium">
-                          Sealed inside the app
-                        </span>
-                        <span className="mt-0.5 block text-xs text-muted-foreground">
-                          {bundled.length} components that arrive and leave with
-                          the app. Nothing here can be updated on its own.
-                        </span>
-                      </span>
-                      <RiArrowDownSLine
-                        className={cn(
-                          "size-4 shrink-0 text-muted-foreground transition-transform duration-200",
-                          showBundled && "rotate-180"
-                        )}
-                      />
-                    </CollapsibleTrigger>
-                    <CollapsibleContent className="flex flex-col gap-2 pt-2">
-                      {bundled.map((entry) => (
-                        <ComponentRow key={entry.id} report={entry} />
-                      ))}
-                    </CollapsibleContent>
-                  </Collapsible>
-                ) : null}
               </>
             ) : (
               <div className="border bg-muted/20 p-3 text-xs text-muted-foreground">
                 The app, the download service, yt-dlp, ffmpeg, ffprobe, the JS
-                runtime and Python are all checked together. Anything the app
-                ships is folded away - updating the app updates all of it.
+                runtime and Python are all checked together. Open the app&apos;s
+                row afterwards to see everything sealed inside it.
               </div>
             )}
           </div>

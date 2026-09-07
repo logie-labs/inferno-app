@@ -65,3 +65,6 @@ next_prompt
 # Per-machine agent permissions. A global ignore covers this on the machine it
 # was written on; naming it here means the protection travels with the repo.
 .claude/settings.local.json
+
+# next prompt 
+next_prompt

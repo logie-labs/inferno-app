@@ -102,9 +102,10 @@ published in this repository; yt-dlp is compared against
 [its own releases](https://github.com/yt-dlp/yt-dlp/releases), because a stale
 yt-dlp is the usual reason downloads stop working.
 
-Everything sealed into the installer is folded away in that screen — updating
-the app updates all of it at once. Checking is a plain unauthenticated request
-to the GitHub API, and can be turned off entirely.
+Everything sealed into the installer sits behind the app's own row in that
+screen — open it to see the exact versions you are running. Updating the app
+updates all of them at once. Checking is a plain unauthenticated request to the
+GitHub API, and can be turned off entirely.
 
 Releases are tagged `vMAJOR.MINOR.PATCH`. The version the app reports comes
 from `src-tauri/tauri.conf.json`, so a release tag and that file have to agree.
