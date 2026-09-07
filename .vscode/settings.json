@@ -1,0 +1,13 @@
+{
+  // `components.json` points at https://ui.shadcn.com/schema.json, and VS Code
+  // refuses to fetch remote JSON schemas it has not been told to trust - which
+  // it reports as an error on the file rather than a prompt. shadcn's own
+  // schema is the one that file is written against, so allow it.
+  "json.schemas": [
+    {
+      "fileMatch": ["components.json"],
+      "url": "https://ui.shadcn.com/schema.json"
+    }
+  ],
+  "json.schemaDownload.enable": true
+}

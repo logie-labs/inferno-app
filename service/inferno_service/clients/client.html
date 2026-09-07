@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inferno — test client</title>
+<style>
+  :root { color-scheme: light dark; --line: #8883; --accent: #3b82f6; --bad: #dc2626; --good: #16a34a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; padding: 24px; max-width: 1100px; margin-inline: auto; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; opacity: .7; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 0 0 16px; }
+  legend { padding: 0 6px; opacity: .7; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 0 0 auto; }
+  input[type=text] { flex: 1 1 320px; min-width: 220px; }
+  input, select, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  label.check { display: inline-flex; gap: 5px; align-items: center; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { position: sticky; top: 0; background: Canvas; }
+  .scroll { max-height: 260px; overflow: auto; }
+  progress { width: 100%; height: 14px; }
+  progress.dead::-webkit-progress-value { background: var(--bad); }
+  progress.dead::-moz-progress-bar { background: var(--bad); }
+  .steps { display: flex; align-items: center; gap: 6px; margin: 8px 0 5px; font-size: 11px; }
+  .step { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); opacity: .4; }
+  .step-now { opacity: 1; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .step-done { opacity: .9; border-color: var(--good); color: var(--good); }
+  .step-bad { opacity: 1; border-color: var(--bad); color: var(--bad); }
+  .step-sep { opacity: .25; }
+  pre { background: #8881; padding: 10px; border-radius: 6px; overflow: auto; max-height: 240px; font-size: 12px; }
+  .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+  .status-completed { color: var(--good); }
+  .status-failed, .status-cancelled { color: var(--bad); }
+  .err { color: var(--bad); }
+  .muted { opacity: .65; }
+  .job { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+  .job h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>Inferno <span style="opacity:.5;font-weight:400">— test client</span></h1>
+<p class="sub">A minimal consumer of the public API. It has no privileged path: every action below is an ordinary HTTP or WebSocket call you could make from anything else.</p>
+
+<fieldset>
+  <legend>Service</legend>
+  <div class="row">
+    <input type="text" id="base" placeholder="http://127.0.0.1:8765">
+    <input type="text" id="token" placeholder="API token (optional)" style="flex:0 1 220px">
+    <button id="connect">Connect</button>
+    <span id="health" class="muted">not connected</span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Request</legend>
+  <div class="row" style="margin-bottom:10px">
+    <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=...">
+    <button id="btn-info">Info</button>
+    <button id="btn-formats">Formats</button>
+    <button id="btn-subs">Subtitles</button>
+    <button id="btn-download" class="primary">Download</button>
+  </div>
+  <div class="row">
+    <select id="mode"><option value="video">video</option><option value="audio">audio</option></select>
+    <select id="quality">
+      <option>best</option><option>2160p</option><option>1440p</option><option selected>1080p</option>
+      <option>720p</option><option>480p</option><option>360p</option><option>worst</option>
+    </select>
+    <select id="container"><option value="">container: auto</option><option>mp4</option><option>mkv</option><option>webm</option></select>
+    <select id="audioFormat"><option value="">audio: as-is</option><option>mp3</option><option>m4a</option><option>opus</option><option>flac</option><option>wav</option></select>
+    <input type="text" id="formatId" placeholder="format_id (escape hatch)" style="flex:0 1 200px">
+    <label class="check"><input type="checkbox" id="thumb" checked> embed thumbnail</label>
+    <label class="check"><input type="checkbox" id="meta" checked> embed metadata</label>
+    <label class="check"><input type="checkbox" id="playlist"> playlist</label>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Jobs <span id="wsdot" class="pill">ws: closed</span></legend>
+  <div id="jobs"></div>
+</fieldset>
+
+<fieldset>
+  <legend>Response</legend>
+  <div id="formatsBox" class="scroll" hidden><table id="formatsTable"></table></div>
+  <pre id="out">Enter a service URL and press Connect.</pre>
+</fieldset>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { base: '', token: '', ws: null, jobs: new Map(), lastSeq: null };
+
+function api(path, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  if (state.token) headers['X-API-Key'] = state.token;
+  if (options.body) headers['Content-Type'] = 'application/json';
+  return fetch(state.base + path, Object.assign({}, options, { headers })).then(async (response) => {
+    if (response.status === 204) return null;
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = (payload && payload.error) || { code: 'http_' + response.status, message: response.statusText };
+      throw error;
+    }
+    return payload;
+  });
+}
+
+function show(value) { $('out').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+function showError(error) { $('out').innerHTML = '<span class="err">[' + (error.code || 'error') + '] ' + (error.message || error) + '</span>'; }
+function bytes(n) {
+  if (!n && n !== 0) return '-';
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let size = n, i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return size.toFixed(1) + ' ' + units[i];
+}
+
+// --- health -----------------------------------------------------------------
+
+$('connect').onclick = async () => {
+  state.base = ($('base').value || $('base').placeholder).replace(/\/$/, '');
+  state.token = $('token').value.trim();
+  try {
+    const health = await api('/health');
+    const js = health.js_runtime || {};
+    $('health').innerHTML =
+      'yt-dlp ' + health.yt_dlp_version +
+      ' · ffmpeg <b>' + (health.ffmpeg.available ? health.ffmpeg.source : 'MISSING') + '</b>' +
+      ' · js <b>' + (js.available ? (js.name || 'ok') : 'MISSING') + '</b>' +
+      ' · max ' + health.max_concurrent;
+    show(health);
+    openFirehose();
+    refreshJobs();
+  } catch (error) { showError(error); }
+};
+
+// --- metadata ---------------------------------------------------------------
+
+const urlValue = () => encodeURIComponent($('url').value.trim());
+
+$('btn-info').onclick = () =>
+  api('/api/v1/info?url=' + urlValue() + '&playlist=' + $('playlist').checked)
+    .then((payload) => { $('formatsBox').hidden = true; show(payload); })
+    .catch(showError);
+
+$('btn-subs').onclick = () =>
+  api('/api/v1/subtitles?url=' + urlValue())
+    .then((payload) => { $('formatsBox').hidden = true; show(payload); })
+    .catch(showError);
+
+$('btn-formats').onclick = () =>
+  api('/api/v1/formats?url=' + urlValue()).then((payload) => {
+    const rows = payload.formats.map((f) =>
+      '<tr><td><code>' + f.format_id + '</code></td><td>' + (f.ext || '') + '</td><td>' +
+      (f.resolution || '') + '</td><td>' + (f.fps || '') + '</td><td>' +
+      bytes(f.filesize || f.filesize_approx) + '</td><td>' + (f.vcodec || '') + '</td><td>' +
+      (f.acodec || '') + '</td><td class="muted">' + (f.format_note || '') + '</td></tr>').join('');
+    $('formatsTable').innerHTML =
+      '<thead><tr><th>id</th><th>ext</th><th>res</th><th>fps</th><th>size</th><th>vcodec</th><th>acodec</th><th>note</th></tr></thead><tbody>' + rows + '</tbody>';
+    $('formatsBox').hidden = false;
+    show(payload.title + ' — ' + payload.formats.length + ' formats. Click a format_id to use it as the escape hatch.');
+    $('formatsTable').querySelectorAll('code').forEach((code) => {
+      code.style.cursor = 'pointer';
+      code.onclick = () => { $('formatId').value = code.textContent; };
+    });
+  }).catch(showError);
+
+// --- downloads --------------------------------------------------------------
+
+$('btn-download').onclick = () => {
+  const body = {
+    url: $('url').value.trim(),
+    mode: $('mode').value,
+    quality: $('quality').value,
+    playlist: $('playlist').checked,
+    embed_thumbnail: $('thumb').checked,
+    embed_metadata: $('meta').checked,
+  };
+  if ($('container').value) body.container = $('container').value;
+  if ($('audioFormat').value) body.audio_format = $('audioFormat').value;
+  if ($('formatId').value.trim()) body.format_id = $('formatId').value.trim();
+
+  api('/api/v1/downloads', { method: 'POST', body: JSON.stringify(body) })
+    .then((job) => { show(job); upsertJob(job); })
+    .catch(showError);
+};
+
+function refreshJobs() {
+  api('/api/v1/downloads?limit=25').then((payload) => payload.jobs.reverse().forEach(upsertJob)).catch(showError);
+}
+
+// --- the three stages a person actually sees --------------------------------
+//
+// The server reports progress per stream, because that is what yt-dlp does: on
+// a video+audio merge, percent runs 0->100 twice and the two passes are told
+// apart by format_id (SPEC section 5). Rendering that raw gives a bar that
+// fills twice, which reads as a bug even though the data is correct.
+//
+// Presentation is the client's job (SPEC section 1), so we collapse it into
+// three stages. Only the middle one has a real percentage — extraction has no
+// measurable total and ffmpeg reports none at all, so those two are honestly
+// indeterminate.
+//
+// The download stage is weighted BY STREAM, not by bytes. Byte-weighting cannot
+// be monotonic: the audio stream's size is unknown until it starts, and on real
+// YouTube it is a large share of the job (a 15 MB video with 10 MB of audio is
+// ordinary), so learning it late drags the bar backwards by tens of points.
+// Each expected stream owns an equal slice instead: with a merge, video fills
+// 0-50% and audio fills 50-100%. How many to expect comes from the job's
+// resolved options, and a high-water mark makes going backwards impossible even
+// if that expectation is wrong.
+
+const STAGE_ORDER = ['preparing', 'downloading', 'processing'];
+const STAGE_FOR_STATUS = {
+  queued: 'preparing', extracting: 'preparing',
+  downloading: 'downloading', postprocessing: 'processing',
+  completed: 'done', failed: 'done', cancelled: 'done',
+};
+const TERMINAL = ['completed', 'failed', 'cancelled'];
+
+function stageOf(job) { return STAGE_FOR_STATUS[job.status] || 'preparing'; }
+
+function expectedStreams(job) {
+  const merging = ((job.options || {}).merging) ? 2 : 1;
+  return Math.max(merging, Object.keys(job.streams || {}).length, 1);
+}
+
+function ingestProgress(job, data, finished) {
+  if (!job.streams) job.streams = {};
+  const key = data.format_id || '?';
+  const stream = job.streams[key] || (job.streams[key] = { downloaded: 0, total: 0, done: false });
+  // Monotonic per stream: a retried fragment must not walk the bar back.
+  stream.downloaded = Math.max(stream.downloaded, data.downloaded_bytes || 0);
+  const total = data.total_bytes || data.total_bytes_estimate;
+  if (total) stream.total = Math.max(stream.total, total);
+  if (finished) { stream.total = Math.max(stream.total, stream.downloaded); stream.done = true; }
+  job.speed = data.speed;
+  job.eta = data.eta;
+  job.note = 'stream ' + Object.keys(job.streams).length + '/' + expectedStreams(job) +
+    ' (format ' + key + ')';
+  refreshProgress(job);
+}
+
+function totals(job) {
+  const streams = Object.values(job.streams || {});
+  return {
+    got: streams.reduce((a, s) => a + (s.downloaded || 0), 0),
+    total: streams.reduce((a, s) => a + (s.total || 0), 0),
+    count: streams.length,
+  };
+}
+
+function refreshProgress(job) {
+  // Advance the high-water mark. The bar only ever moves forwards.
+  if (job.highWater === undefined) job.highWater = 0;
+  if (stageOf(job) !== 'downloading') return;
+  const streams = Object.values(job.streams || {});
+  if (!streams.length) return;
+  const finished = streams.filter((s) => s.done).length;
+  let active = 0;
+  streams.forEach((s) => {
+    if (!s.done && s.total) active = Math.max(active, s.downloaded / s.total);
+  });
+  const share = (finished + active) / expectedStreams(job) * 100;
+  // Never claim 100% while the stage is still running: the audio stream of a
+  // merge only appears after the video stream has finished.
+  job.highWater = Math.max(job.highWater, Math.min(share, 99.9));
+}
+
+function jobPercent(job) {
+  if (job.status === 'completed') return 100;
+  if (stageOf(job) !== 'downloading') return null;   // null means indeterminate
+  const streams = Object.values(job.streams || {});
+  if (!streams.length) return null;
+  // Nothing measurable yet: a stream is running but has reported no total and
+  // none has completed. A determinate 0% would just look stuck.
+  if (!streams.some((s) => s.total || s.done)) return null;
+  return job.highWater || 0;
+}
+
+function renderBar(job) {
+  if (job.status === 'completed') return '<progress max="100" value="100"></progress>';
+  if (job.status === 'failed' || job.status === 'cancelled') {
+    // Leave the bar stalled where it got to, rather than spinning forever.
+    return '<progress class="dead" max="100" value="' + (job.highWater || 0) + '"></progress>';
+  }
+  const percent = jobPercent(job);
+  return percent === null
+    ? '<progress></progress>'                                  // indeterminate
+    : '<progress max="100" value="' + percent.toFixed(1) + '"></progress>';
+}
+
+function renderSteps(job) {
+  const stage = stageOf(job);
+  const failed = ['failed', 'cancelled'].includes(job.status);
+  const at = STAGE_ORDER.indexOf(stage);
+  const finished = job.status === 'completed';
+  return '<div class="steps">' + STAGE_ORDER.map((name, i) => {
+    let cls = 'step';
+    if (finished || (at > i && !failed)) cls += ' step-done';
+    else if (failed && at === i) cls += ' step-bad';
+    else if (at === i) cls += ' step-now';
+    return '<span class="' + cls + '">' + (i + 1) + '. ' + name + '</span>';
+  }).join('<span class="step-sep">&rarr;</span>') + '</div>';
+}
+
+function renderDetail(job) {
+  const stage = stageOf(job);
+  if (stage === 'downloading') {
+    const { got, total } = totals(job);
+    const percent = jobPercent(job);
+    return (percent === null ? 'starting' : percent.toFixed(1) + '%') +
+      ' · ' + bytes(got) + ' downloaded' + (total ? ' of ' + bytes(total) + ' so far' : '') +
+      ' · ' + bytes(job.speed) + '/s · eta ' + (job.eta ?? '-') + 's' +
+      (job.note ? ' · ' + job.note : '');
+  }
+  if (stage === 'processing') return job.note || 'merging and embedding';
+  if (job.status === 'completed') {
+    const { total } = totals(job);
+    return 'done in ' + (job.elapsed ?? '?') + 's' + (total ? ' · ' + bytes(total) + ' downloaded' : '');
+  }
+  if (job.status === 'cancelled') return 'cancelled';
+  if (job.status === 'failed') return 'failed';
+  return job.note || 'waiting for a slot';
+}
+
+function upsertJob(job) {
+  const merged = Object.assign(state.jobs.get(job.job_id) || {}, job);
+  // A job fetched over REST arrives with only its latest tick, so seed the
+  // stream table from it rather than showing an empty bar until the next event.
+  if (!merged.streams && merged.progress && merged.progress.format_id) {
+    merged.streams = {};
+    ingestProgress(merged, merged.progress, merged.progress.status === 'finished');
+  }
+  state.jobs.set(job.job_id, merged);
+  renderJobs();
+}
+
+function renderJobs() {
+  const ordered = [...state.jobs.values()].sort((a, b) => b.created_at - a.created_at);
+  $('jobs').innerHTML = ordered.map((job) => {
+    const files = (job.files || []).map((f) =>
+      '<a href="' + state.base + f.url + (state.token ? '?token=' + encodeURIComponent(state.token) : '') +
+      '">' + f.name + '</a> <span class="muted">(' + bytes(f.size) + ')</span>').join(' · ');
+    const error = job.error ? '<div class="err">[' + job.error.code + '] ' + job.error.message + '</div>' : '';
+    const active = !TERMINAL.includes(job.status);
+    return '<div class="job"><h3>' + (job.video ? job.video.title : job.url) +
+      ' <span class="pill status-' + job.status + '">' + job.status + '</span>' +
+      ' <span class="muted">' + job.job_id + '</span>' +
+      (active ? ' <button onclick="cancelJob(\'' + job.job_id + '\')">cancel</button>' : '') +
+      ' <button onclick="removeJob(\'' + job.job_id + '\')">remove</button></h3>' +
+      renderSteps(job) + renderBar(job) +
+      '<div class="muted">' + renderDetail(job) + '</div>' + error +
+      (files ? '<div>' + files + '</div>' : '') + '</div>';
+  }).join('') || '<span class="muted">No jobs yet.</span>';
+}
+
+window.cancelJob = (id) => api('/api/v1/downloads/' + id + '/cancel', { method: 'POST' }).then(upsertJob).catch(showError);
+window.removeJob = (id) => api('/api/v1/downloads/' + id, { method: 'DELETE' })
+  .then(() => { state.jobs.delete(id); renderJobs(); }).catch(showError);
+
+// --- the firehose -----------------------------------------------------------
+//
+// Browsers cannot set headers on a WebSocket, which is exactly why the API
+// accepts ?token=. Reconnects pass ?since= so nothing is missed.
+
+function openFirehose() {
+  if (state.ws) state.ws.close();
+  const wsBase = state.base.replace(/^http/, 'ws');
+  const params = new URLSearchParams();
+  if (state.token) params.set('token', state.token);
+  if (state.lastSeq !== null) params.set('since', state.lastSeq);
+  const socket = new WebSocket(wsBase + '/ws/events?' + params.toString());
+  state.ws = socket;
+
+  socket.onopen = () => { $('wsdot').textContent = 'ws: open'; };
+  socket.onclose = () => { $('wsdot').textContent = 'ws: closed — retrying'; setTimeout(openFirehose, 2000); };
+  socket.onerror = () => { $('wsdot').textContent = 'ws: error'; };
+  socket.onmessage = (message) => {
+    const frame = JSON.parse(message.data);
+    state.lastSeq = frame.seq;
+    const data = frame.data || {};
+
+    if (frame.type === 'hello') {
+      if (data.replay_truncated) show('Replay truncated: the buffer had already dropped events newer than the requested seq.');
+      (data.jobs || []).forEach(upsertJob);
+      return;
+    }
+    if (frame.type === 'heartbeat' || frame.type === 'pong') return;
+    if (!frame.job_id) return;
+
+    const job = state.jobs.get(frame.job_id) || { job_id: frame.job_id, url: '(new job)', created_at: frame.ts };
+    if (frame.type === 'job.queued' && data.job) Object.assign(job, data.job);
+    if (frame.type === 'progress' || frame.type === 'progress.finished') {
+      job.progress = data;
+      ingestProgress(job, data, frame.type === 'progress.finished');
+    }
+    if (frame.type === 'postprocessor') {
+      job.note = (data.postprocessor || 'postprocessor') + ' ' + (data.status || '');
+    }
+    if (frame.type.startsWith('job.')) job.status = data.status || job.status;
+    if (frame.type === 'job.extracting') job.note = 'reading metadata and choosing formats';
+    if (frame.type === 'job.postprocessing') { job.note = 'merging and embedding'; job.speed = job.eta = null; }
+    if (frame.type === 'job.completed') {
+      job.files = data.files || [];
+      job.video = data.video || job.video;
+      job.elapsed = data.elapsed;
+    }
+    if (frame.type === 'job.failed') job.error = data.error;
+    upsertJob(job);
+  };
+}
+
+$('base').value = location.origin.startsWith('http') ? location.origin : '';
+</script>
+</body>
+</html>

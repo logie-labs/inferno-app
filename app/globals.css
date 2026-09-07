@@ -2,128 +2,353 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* Windows caption/system glyphs - see `components/window-toolbar.tsx`. */
+@font-face {
+  font-family: "Segoe Fluent Icons";
+  src: url("/sfi.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Tailwind v4 auto source detection skips dot-directories, so the design-sync
+   preview compositions are invisible to the JIT scan without this. Keeping them
+   scanned means the stylesheet shipped to claude.ai/design actually contains the
+   utilities those previews use. */
+@source "../.design-sync/previews";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-heading: var(--font-sans);
-    --font-sans: var(--font-sans);
-    --color-sidebar-ring: var(--sidebar-ring);
-    --color-sidebar-border: var(--sidebar-border);
-    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-    --color-sidebar-accent: var(--sidebar-accent);
-    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-    --color-sidebar-primary: var(--sidebar-primary);
-    --color-sidebar-foreground: var(--sidebar-foreground);
-    --color-sidebar: var(--sidebar);
-    --color-chart-5: var(--chart-5);
-    --color-chart-4: var(--chart-4);
-    --color-chart-3: var(--chart-3);
-    --color-chart-2: var(--chart-2);
-    --color-chart-1: var(--chart-1);
-    --color-ring: var(--ring);
-    --color-input: var(--input);
-    --color-border: var(--border);
-    --color-destructive: var(--destructive);
-    --color-accent-foreground: var(--accent-foreground);
-    --color-accent: var(--accent);
-    --color-muted-foreground: var(--muted-foreground);
-    --color-muted: var(--muted);
-    --color-secondary-foreground: var(--secondary-foreground);
-    --color-secondary: var(--secondary);
-    --color-primary-foreground: var(--primary-foreground);
-    --color-primary: var(--primary);
-    --color-popover-foreground: var(--popover-foreground);
-    --color-popover: var(--popover);
-    --color-card-foreground: var(--card-foreground);
-    --color-card: var(--card);
-    --color-foreground: var(--foreground);
-    --color-background: var(--background);
-    --radius-sm: calc(var(--radius) * 0.6);
-    --radius-md: calc(var(--radius) * 0.8);
-    --radius-lg: var(--radius);
-    --radius-xl: calc(var(--radius) * 1.4);
-    --radius-2xl: calc(var(--radius) * 1.8);
-    --radius-3xl: calc(var(--radius) * 2.2);
-    --radius-4xl: calc(var(--radius) * 2.6);
+  --font-heading: var(--font-sans);
+  --font-icon: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.852 0.199 91.936);
-    --primary-foreground: oklch(0.421 0.095 57.708);
-    --secondary: oklch(0.967 0.001 286.375);
-    --secondary-foreground: oklch(0.21 0.006 285.885);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.905 0.182 98.111);
-    --chart-2: oklch(0.795 0.184 86.047);
-    --chart-3: oklch(0.681 0.162 75.834);
-    --chart-4: oklch(0.554 0.135 66.442);
-    --chart-5: oklch(0.476 0.114 61.907);
-    --radius: 0.45rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.681 0.162 75.834);
-    --sidebar-primary-foreground: oklch(0.987 0.026 102.212);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+  /* The window's own title bar, which is drawn by the app rather than the OS.
+     Shared with the dialogs, which centre themselves in the space *below* it -
+     hard-coding the same number in both is how a dialog ends up tucked under
+     the toolbar the next time the bar changes height. */
+  --inferno-toolbar-height: 2rem;
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.505 0.213 27.518);
+  --primary-foreground: oklch(0.971 0.013 17.38);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.808 0.114 19.571);
+  --chart-2: oklch(0.637 0.237 25.331);
+  --chart-3: oklch(0.577 0.245 27.325);
+  --chart-4: oklch(0.505 0.213 27.518);
+  --chart-5: oklch(0.444 0.177 26.899);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.577 0.245 27.325);
+  --sidebar-primary-foreground: oklch(0.971 0.013 17.38);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.795 0.184 86.047);
-    --primary-foreground: oklch(0.421 0.095 57.708);
-    --secondary: oklch(0.274 0.006 286.033);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.905 0.182 98.111);
-    --chart-2: oklch(0.795 0.184 86.047);
-    --chart-3: oklch(0.681 0.162 75.834);
-    --chart-4: oklch(0.554 0.135 66.442);
-    --chart-5: oklch(0.476 0.114 61.907);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.795 0.184 86.047);
-    --sidebar-primary-foreground: oklch(0.987 0.026 102.212);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.444 0.177 26.899);
+  --primary-foreground: oklch(0.971 0.013 17.38);
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.808 0.114 19.571);
+  --chart-2: oklch(0.637 0.237 25.331);
+  --chart-3: oklch(0.577 0.245 27.325);
+  --chart-4: oklch(0.505 0.213 27.518);
+  --chart-5: oklch(0.444 0.177 26.899);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.637 0.237 25.331);
+  --sidebar-primary-foreground: oklch(0.971 0.013 17.38);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* Collapsible open/close.
+   `tw-animate-css` ships `collapsible-up`/`collapsible-down`, but they read
+   `--radix-collapsible-content-height` (with fallbacks for the other
+   Radix-derived libraries) and Base UI publishes `--collapsible-panel-height`
+   instead - so those keyframes resolve to `auto` and the panel jumps rather
+   than glides. These are the same animation against the right variable. */
+@keyframes inferno-collapsible-down {
+  from {
+    height: 0;
+  }
+  to {
+    height: var(--collapsible-panel-height);
+  }
+}
+
+@keyframes inferno-collapsible-up {
+  from {
+    height: var(--collapsible-panel-height);
+  }
+  to {
+    height: 0;
+  }
+}
+
+.inferno-collapsible-down {
+  animation: inferno-collapsible-down 200ms ease-out;
+}
+
+.inferno-collapsible-up {
+  animation: inferno-collapsible-up 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inferno-collapsible-down,
+  .inferno-collapsible-up {
+    animation: none;
+  }
+}
+
+/* Carried over from the `Inferno Main.dc.html` canvas: the diagonal hatch used for
+   thumbnail placeholders, and the stage pulse on in-progress queue rows. */
+@keyframes infernoPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.inferno-hatch {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--foreground) 7%, transparent) 0 6px,
+    transparent 6px 12px
+  );
+}
+
+.inferno-pulse {
+  animation: infernoPulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inferno-pulse {
+    animation: none;
+  }
+}
+
+/* The barber-pole shown on a segment that is actively transferring.
+
+   Revealed by clipping, not by growing the stripes. The stripes are always at
+   full size; only the window onto them opens and closes, wiping across the bar.
+
+   Interpolating the stripe *width* was the obvious way to make an otherwise
+   un-transitionable background-image animate, but it looks wrong in motion: a
+   stripe part-way to its final width lands on fractional pixels, so the edges
+   shimmer and beat against the scrolling as the two rates cross. `clip-path`
+   moves one straight edge across a pattern whose geometry never changes, so
+   there is nothing to alias.
+
+   Drawn on a pseudo-element rather than the indicator itself. The indicator
+   carries `transition-all`, which is how Base UI eases the fill; a `transition`
+   here would replace that shorthand and the bar would start jumping between
+   percentages instead of gliding. */
+@keyframes infernoBarberpole {
+  to {
+    /* One full period along x. The gradient runs at 45deg, so its horizontal
+       repeat is the period / sin(45deg) - i.e. period * sqrt(2). Anything else
+       drifts, and the stripes visibly jump on every cycle. */
+    background-position-x: 19.8px;
+  }
+}
+
+.inferno-barberpole [data-slot="progress-track"] {
+  position: relative;
+  overflow: hidden;
+}
+
+.inferno-barberpole [data-slot="progress-track"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    45deg,
+    color-mix(in oklab, var(--foreground) 20%, transparent) 0 7px,
+    transparent 7px 14px
+  );
+  animation: infernoBarberpole 620ms linear infinite;
+  /* Closed: a zero-width window at the left edge. */
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 320ms ease-out;
+}
+
+.inferno-barberpole-on [data-slot="progress-indicator"]::after {
+  clip-path: inset(0 0 0 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inferno-barberpole [data-slot="progress-track"]::after {
+    /* The stripes still say "this one is working"; only the travel goes. */
+    animation: none;
+    transition: none;
+  }
+}
+
+/* The snapshots must not swallow clicks.
+
+   A view transition paints its pseudo-elements in the top layer, covering the
+   whole viewport for as long as the animation runs. The real page is live
+   underneath the entire time - the new theme is already applied when the
+   animation starts - but every pointer event was landing on the overlay
+   instead, so the app went dead for the length of the transition. Nearly half
+   a second of an unresponsive window is far worse than the animation is good.
+
+   `::view-transition` is the root of that pseudo tree and the rest inherit
+   from it, but the descendants are named explicitly as well: they are
+   generated elements, and a browser that gives any of them their own
+   `pointer-events` value would put the dead overlay straight back. */
+::view-transition,
+::view-transition-group(*),
+::view-transition-image-pair(*),
+::view-transition-old(*),
+::view-transition-new(*) {
+  pointer-events: none;
+}
+
+/* Every theme-change animation is driven from `ThemeSync`, so the browser's
+   own animations are switched off here and the timing lives in one constant in
+   that file. Left on, the two run at once: the default fades the snapshots
+   while our keyframes move them, and the pair reads as a flicker rather than
+   one movement. */
+::view-transition-old(root),
+::view-transition-new(root),
+::view-transition-old(inferno-toolbar),
+::view-transition-new(inferno-toolbar),
+::view-transition-old(inferno-sidebar),
+::view-transition-new(inferno-sidebar) {
+  animation: none;
+}
+
+/* `plus-lighter` is built for a pure cross-fade of two identical layers, which
+   is what the chrome does - so it keeps the browser default and avoids the grey
+   dip in the middle that two opposing opacity ramps otherwise produce. The page
+   is a different case: it scales as it fades, so the same blend makes the
+   moving snapshot glow along the edges where the two overlap. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  mix-blend-mode: normal;
+}
+
+/* Nothing to blend when the two are the same size and one is simply replacing
+   the other, so the incoming snapshot sits on top rather than through. */
+::view-transition-new(root) {
+  z-index: 1;
+}
+
+/* The window chrome sits out of the movement.
+
+   Naming an element makes the browser snapshot it as its own group and cut it
+   out of the root snapshot, so the page can scale underneath while these hold
+   still. Both are chrome rather than content, and both are pinned to an edge -
+   the toolbar to the top, the rail to the left - so any scale at all makes them
+   visibly detach from the window they are supposed to be part of.
+
+   Assigning a name is the one thing that can only be done in CSS, so these two
+   declarations are mirrored by `CHROME_GROUPS` in `theme-provider.tsx`. Nothing
+   else about the animation lives here. */
+.inferno-vt-toolbar {
+  view-transition-name: inferno-toolbar;
+}
+
+.inferno-vt-sidebar {
+  view-transition-name: inferno-sidebar;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    }
+  }
+  /* One selection colour for the whole app, rather than the browser's blue
+     everywhere and the app's red in the one field that happened to ask for
+     it. The text keeps `foreground`, which flips with the theme, so selected
+     text stays the colour it already was and only its ground changes. */
+  ::selection {
+    @apply bg-primary text-foreground;
+  }
   body {
     @apply bg-background text-foreground;
-    }
+  }
   html {
     @apply font-sans;
-    }
+  }
 }

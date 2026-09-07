@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+downloads/
+.bootcheck/
+.env
+
+# Bundled binaries are large and platform-specific; see README.
+vendor/ffmpeg/*
+vendor/js/*
+!vendor/**/.gitkeep
+!vendor/README.md

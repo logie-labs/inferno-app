@@ -1,0 +1,5 @@
+export * from "./settings-sections"
+export * from "./keybinds-section"
+export * from "./backup-section"
+export * from "./spotify-section"
+export * from "./updates-section"

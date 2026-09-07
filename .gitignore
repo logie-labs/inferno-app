@@ -34,3 +34,20 @@ pnpm-debug.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# design-sync
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+.design-sync/styles/
+
+# inferno-service
+# The Python source is versioned. Its own service/.gitignore already excludes
+# the virtualenv, the PyInstaller output and the large, platform-specific
+# vendored binaries - see service/vendor/README.md for how to restore those.
+service/inferno-settings.json
+
+# Stray output if the service is ever launched from src-tauri.
+src-tauri/downloads/
