@@ -14,13 +14,11 @@ import {
   RiPushpinLine,
   RiQuestionLine,
   RiRefreshLine,
-  RiRssLine,
 } from "@remixicon/react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
 import {
   Collapsible,
   CollapsibleContent,
@@ -37,6 +35,7 @@ import { describeError, openUrl, revealPath } from "@/lib/inferno-service"
 import {
   bundledComponents,
   checkForUpdates,
+  DEFAULT_APP_REPO,
   describeAge,
   describeFeed,
   failedComponents,
@@ -51,10 +50,7 @@ import {
 } from "@/lib/updates"
 import { cn } from "@/lib/utils"
 
-import type {
-  SettingsConfig,
-  SettingsSectionComponentProps,
-} from "../settings-config"
+import type { SettingsSectionComponentProps } from "../settings-config"
 import { SettingsPanel, SettingsToggle } from "./settings-primitives"
 
 /**
@@ -88,11 +84,6 @@ const STATE_STYLE: Record<
     icon: RiCloseCircleLine,
   },
   unknown: { label: "Unknown", variant: "ghost", icon: RiQuestionLine },
-  unconfigured: {
-    label: "Not checked",
-    variant: "ghost",
-    icon: RiQuestionLine,
-  },
   error: {
     label: "Check failed",
     variant: "destructive",
@@ -114,8 +105,6 @@ function versionNote(report: ComponentReport) {
   }
 
   switch (report.state) {
-    case "unconfigured":
-      return "No feed set"
     case "pinned":
       return "Your build"
     case "bundled":
@@ -145,7 +134,6 @@ function messageTone(state: UpdateState) {
     case "error":
       return "text-destructive"
     case "unknown":
-    case "unconfigured":
       return "text-muted-foreground"
     default:
       return null
@@ -170,13 +158,7 @@ function GroupHeading({ title, note }: { title: string; note?: string }) {
 }
 
 /** One component: what it is, what version it is, and what to do about it. */
-function ComponentRow({
-  report,
-  onSetFeed,
-}: {
-  report: ComponentReport
-  onSetFeed?: () => void
-}) {
+function ComponentRow({ report }: { report: ComponentReport }) {
   const style = STATE_STYLE[report.state]
   const Icon = style.icon
   const note = versionNote(report)
@@ -186,18 +168,12 @@ function ComponentRow({
   const releases = report.url
   const location = report.path
 
+  // An even one-pixel border, like every other box on the settings screen. A
+  // thicker edge on one side made each row look like a quotation and set it
+  // out of line with its neighbours; the badge and the coloured message
+  // already say which row needs somebody.
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-2 border border-l-2 bg-muted/20 p-3 @xl:flex-row @xl:items-center @xl:gap-4",
-        // The one row that needs somebody is the one wearing the accent.
-        report.state === "outdated"
-          ? "border-l-primary"
-          : report.state === "unavailable" || report.state === "error"
-            ? "border-l-destructive"
-            : "border-l-border"
-      )}
-    >
+    <div className="flex flex-col gap-2 border bg-muted/20 p-3 @xl:flex-row @xl:items-center @xl:gap-4">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">{report.name}</span>
@@ -242,13 +218,7 @@ function ComponentRow({
           splits in two, and a labelled button here cost more width than the
           version it sat beside - which is the thing somebody came to read. */}
       <div className="flex shrink-0 items-center justify-end">
-        {onSetFeed ? (
-          <RowAction
-            label="Set the release feed"
-            icon={RiRssLine}
-            onClick={onSetFeed}
-          />
-        ) : releases ? (
+        {releases ? (
           <RowAction
             label={`Open ${report.name} releases`}
             icon={RiExternalLinkLine}
@@ -355,16 +325,7 @@ function Summary({ report }: { report: UpdateReport | null }) {
     : RiCheckLine
 
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-4 border border-l-2 bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between",
-        missing.length > 0
-          ? "border-l-destructive"
-          : behind.length > 0
-            ? "border-l-primary"
-            : "border-l-border"
-      )}
-    >
+    <div className="flex flex-col gap-4 border bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between">
       <div className="flex min-w-0 items-start gap-2">
         <Icon
           className={cn(
@@ -427,7 +388,7 @@ function SidePanel({
   children: React.ReactNode
 }) {
   return (
-    <section className="border border-l-2 border-l-border bg-muted/20">
+    <section className="border bg-muted/20">
       <header className="border-b p-3">
         <h3 className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase">
           {title}
@@ -443,23 +404,14 @@ function describeFeedTarget(feed: string) {
   const target = describeFeed(feed)
 
   switch (target.kind) {
-    case "none":
-      return "The app's own version is not being checked."
     case "github":
-      return `Reads releases from the ${target.repo} repository on GitHub.`
+      return target.builtIn
+        ? `Reads releases from ${target.repo}, the feed this build ships with.`
+        : `Reads releases from the ${target.repo} repository on GitHub.`
     case "json":
       return "Reads a JSON manifest, in Tauri's updater shape."
   }
 }
-
-const FREQUENCIES: Array<{
-  value: SettingsConfig["updates"]["frequency"]
-  label: string
-}> = [
-  { value: "never", label: "Off" },
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-]
 
 export function UpdatesSection({
   config,
@@ -487,15 +439,6 @@ export function UpdatesSection({
   const bundled = bundledComponents(report)
   const app = tracked.filter((entry) => entry.id === "app")
   const external = tracked.filter((entry) => entry.id !== "app")
-
-  const focusFeed = () => {
-    const field = document.getElementById("updates-feed-url")
-
-    if (field instanceof HTMLInputElement) {
-      field.scrollIntoView({ block: "center", behavior: "smooth" })
-      field.focus()
-    }
-  }
 
   const runCheck = () => {
     void checkForUpdates(preferences)
@@ -586,17 +529,11 @@ export function UpdatesSection({
                   note={
                     app[0]?.latest
                       ? "Checked against its release feed"
-                      : "Not being checked"
+                      : "No release found yet"
                   }
                 />
                 {app.map((entry) => (
-                  <ComponentRow
-                    key={entry.id}
-                    report={entry}
-                    onSetFeed={
-                      entry.state === "unconfigured" ? focusFeed : undefined
-                    }
-                  />
+                  <ComponentRow key={entry.id} report={entry} />
                 ))}
 
                 {external.length > 0 ? (
@@ -659,40 +596,9 @@ export function UpdatesSection({
           </div>
 
           <div className="flex min-w-0 flex-col gap-4">
-            <SidePanel title="When to check">
-              <div>
-                <div className="mb-2 text-sm font-medium">Automatically</div>
-                <ButtonGroup className="w-full">
-                  {FREQUENCIES.map((option) => (
-                    <Button
-                      key={option.value}
-                      variant={
-                        preferences.frequency === option.value
-                          ? "secondary"
-                          : "outline"
-                      }
-                      size="sm"
-                      className="flex-1"
-                      aria-pressed={preferences.frequency === option.value}
-                      onClick={() =>
-                        updateConfig((current) => ({
-                          ...current,
-                          updates: {
-                            ...current.updates,
-                            frequency: option.value,
-                          },
-                        }))
-                      }
-                    >
-                      {option.label}
-                    </Button>
-                  ))}
-                </ButtonGroup>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  How often to check again while the app stays open.
-                </p>
-              </div>
-
+            {/* "Checking", not "When to check": one of these two is about
+                when, and the other about what happens afterwards. */}
+            <SidePanel title="Checking">
               <PreferenceToggle
                 label="Check on launch"
                 description="Runs a check shortly after the app opens, once the service is up."
@@ -701,30 +607,6 @@ export function UpdatesSection({
                   updateConfig((current) => ({
                     ...current,
                     updates: { ...current.updates, checkOnLaunch },
-                  }))
-                }
-              />
-
-              <PreferenceToggle
-                label="Track yt-dlp releases"
-                description="Compares the bundled yt-dlp with its own latest release. It is the one that explains most downloads that stop working."
-                checked={preferences.includeTools}
-                onCheckedChange={(includeTools) =>
-                  updateConfig((current) => ({
-                    ...current,
-                    updates: { ...current.updates, includeTools },
-                  }))
-                }
-              />
-
-              <PreferenceToggle
-                label="Include pre-releases"
-                description="Counts beta and nightly builds as available updates."
-                checked={preferences.includePrereleases}
-                onCheckedChange={(includePrereleases) =>
-                  updateConfig((current) => ({
-                    ...current,
-                    updates: { ...current.updates, includePrereleases },
                   }))
                 }
               />
@@ -744,14 +626,15 @@ export function UpdatesSection({
 
             <SidePanel title="Release feed">
               <p className="text-xs text-muted-foreground">
-                Where this app&apos;s own releases are published. Left empty,
-                the app stays unchecked rather than being reported as current.
+                Where the app&apos;s own releases are read from. Left empty it
+                uses the one this build ships with - set it only to follow a
+                fork, or your own manifest.
               </p>
 
               <Input
                 id="updates-feed-url"
                 value={preferences.feedUrl}
-                placeholder="owner/repo, or a manifest URL"
+                placeholder={DEFAULT_APP_REPO}
                 onChange={(event) =>
                   updateConfig((current) => ({
                     ...current,
@@ -763,17 +646,7 @@ export function UpdatesSection({
                 }
               />
 
-              <p
-                className={cn(
-                  "flex items-start gap-1.5 text-xs",
-                  describeFeed(preferences.feedUrl).kind === "none"
-                    ? "text-primary"
-                    : "text-muted-foreground"
-                )}
-              >
-                {describeFeed(preferences.feedUrl).kind === "none" ? (
-                  <RiErrorWarningLine className="mt-px size-3.5 shrink-0" />
-                ) : null}
+              <p className="text-xs text-muted-foreground">
                 {describeFeedTarget(preferences.feedUrl)}
               </p>
             </SidePanel>

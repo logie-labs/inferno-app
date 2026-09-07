@@ -18,16 +18,11 @@ import { useCallback, useEffect, useRef } from "react"
 import { toast } from "sonner"
 
 import { useActiveSection } from "@/components/sections/active-section-context"
-import {
-  loadSettingsConfig,
-  useSettingsConfig,
-} from "@/components/sections/settings/settings-config"
+import { loadSettingsConfig } from "@/components/sections/settings/settings-config"
 import { requestSettingsSection } from "@/components/sections/settings/settings-navigation"
 import {
   checkForUpdates,
-  checkIntervals,
   failedComponents,
-  loadLastCheck,
   outdatedComponents,
   updateCheckRequestEvent,
   type UpdateReport,
@@ -43,24 +38,8 @@ import {
  */
 const SERVICE_GRACE = 20_000
 
-/** How often the timer wakes to ask whether a scheduled check is due. */
-const TICK = 60_000
-
 export function UpdateWatcher() {
-  const preferences = useSettingsConfig().updates
   const { setActive } = useActiveSection()
-
-  /**
-   * When this window opened - the clock a scheduled check runs against.
-   *
-   * Stamped in an effect rather than as the ref's initial value: reading the
-   * clock during render is exactly the impurity that makes a re-rendered
-   * component disagree with itself.
-   */
-  const sessionStart = useRef<number | null>(null)
-  useEffect(() => {
-    sessionStart.current = Date.now()
-  }, [])
 
   const announce = useCallback(
     (report: UpdateReport, requested: boolean) => {
@@ -137,36 +116,6 @@ export function UpdateWatcher() {
         // carries the last result and the reason each row is where it is.
       })
   }, [])
-
-  // The recurring check, for a window left open for days.
-  useEffect(() => {
-    const period = checkIntervals[preferences.frequency]
-
-    if (period === null) {
-      return
-    }
-
-    const timer = setInterval(() => {
-      const last = loadLastCheck()?.checkedAt ?? 0
-      // With launch checks off, the clock starts with this session rather than
-      // with a week-old result - otherwise switching them off would produce a
-      // check moments after launch, which is the thing that was switched off.
-      const since = Math.max(
-        last,
-        preferences.checkOnLaunch ? 0 : (sessionStart.current ?? Date.now())
-      )
-
-      if (Date.now() - since < period) {
-        return
-      }
-
-      void checkForUpdates(loadSettingsConfig().updates)
-        .then((report) => announceRef.current(report, false))
-        .catch(() => {})
-    }, TICK)
-
-    return () => clearInterval(timer)
-  }, [preferences.checkOnLaunch, preferences.frequency])
 
   // "Check for updates" from the command menu.
   useEffect(() => {

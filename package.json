@@ -1,6 +1,16 @@
 {
   "name": "inferno-app",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "A desktop downloader for video and audio, built on yt-dlp.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/logie-labs/inferno-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/logie-labs/inferno-app/issues"
+  },
+  "homepage": "https://github.com/logie-labs/inferno-app",
   "type": "module",
   "private": true,
   "scripts": {

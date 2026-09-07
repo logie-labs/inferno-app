@@ -30,6 +30,9 @@ pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the one that documents the settings and holds no values. A clone
+# with no example has to read the SPEC to learn what is configurable.
+!**/.env.example
 
 # typescript
 *.tsbuildinfo
@@ -49,5 +52,16 @@ ds-bundle/
 # vendored binaries - see service/vendor/README.md for how to restore those.
 service/inferno-settings.json
 
+# Anything the app has actually downloaded. Never publishable, and easy to
+# commit by accident once a dev run has filled it with media.
+/downloads/
+
 # Stray output if the service is ever launched from src-tauri.
 src-tauri/downloads/
+
+# Scratch notes, not part of the project.
+next_prompt
+
+# Per-machine agent permissions. A global ignore covers this on the machine it
+# was written on; naming it here means the protection travels with the repo.
+.claude/settings.local.json

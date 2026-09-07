@@ -62,7 +62,6 @@ export type UpdateState =
   | "pinned"
   | "unavailable"
   | "unknown"
-  | "unconfigured"
   | "error"
 
 export type ComponentReport = {
@@ -194,8 +193,30 @@ export type Release = {
 
 const GITHUB_API = "https://api.github.com"
 
+/**
+ * Where this app publishes, when nothing has been set in its place.
+ *
+ * A build constant rather than a default written into the settings, because it
+ * is a fact about this build and not a preference: it should be right for
+ * every install, including ones whose stored settings predate it. The setting
+ * exists to *override* this - for a fork, or a self-hosted manifest.
+ */
+export const DEFAULT_APP_REPO = "logie-labs/inferno-app"
+
 /** Long enough for a cold DNS lookup, short enough not to hang a launch. */
 const REQUEST_TIMEOUT = 12_000
+
+/** A feed that answered with something other than a release. */
+class FeedError extends Error {
+  /** The HTTP status, or 0 when the request never got that far. */
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "FeedError"
+    this.status = status
+  }
+}
 
 /**
  * A JSON GET with a deadline and error messages a person can act on.
@@ -213,40 +234,48 @@ async function getJson(url: string, init: RequestInit = {}): Promise<unknown> {
   try {
     response = await fetch(url, { ...init, signal: controller.signal })
   } catch (cause) {
-    throw new Error(
+    throw new FeedError(
       controller.signal.aborted
         ? "The release feed did not answer in time."
         : `Could not reach the release feed. ${
             cause instanceof Error ? cause.message : ""
-          }`.trim()
+          }`.trim(),
+      0
     )
   } finally {
     clearTimeout(timer)
   }
 
   if (response.status === 404) {
-    throw new Error("The release feed was not found. Check the address.")
+    throw new FeedError(
+      "The release feed was not found. Check the address.",
+      404
+    )
   }
 
   if (response.status === 403 || response.status === 429) {
     // GitHub answers 403 for both "rate limited" and "refused", and only the
     // header tells them apart. Saying which decides whether the answer is
     // "wait an hour" or "fix the address".
-    throw new Error(
+    throw new FeedError(
       response.headers.get("x-ratelimit-remaining") === "0"
         ? "GitHub's hourly rate limit for this network has been reached. Try again later."
-        : "The release feed refused the request."
+        : "The release feed refused the request.",
+      response.status
     )
   }
 
   if (!response.ok) {
-    throw new Error(`The release feed answered ${response.status}.`)
+    throw new FeedError(
+      `The release feed answered ${response.status}.`,
+      response.status
+    )
   }
 
   try {
     return await response.json()
   } catch {
-    throw new Error("The release feed did not return JSON.")
+    throw new FeedError("The release feed did not return JSON.", 200)
   }
 }
 
@@ -260,23 +289,33 @@ type GithubRelease = {
 }
 
 /**
- * The newest release of an `owner/repo`.
+ * The newest release of an `owner/repo`, or null when it has none to give.
  *
- * `/releases/latest` is GitHub's own answer to the question and already skips
- * drafts and prereleases, so it is used whenever prereleases do not count.
- * Only when they do is the list fetched, and then the newest non-draft wins -
- * the list comes back newest first.
+ * `/releases/latest` and nothing else: it is GitHub's own answer to this
+ * question, and it already skips drafts and prereleases. Finished releases are
+ * the only ones anybody is told about here - an update notification is a
+ * suggestion to go and install something, and a nightly is not that.
+ *
+ * Null rather than an error for the empty case, because "no releases yet" is
+ * not a fault: a repository that has just been created, or one that is still
+ * private, answers exactly like this, and neither deserves a red badge. The
+ * two are indistinguishable to an unauthenticated caller - both are a bare
+ * 404 - which is why the message the caller shows names both possibilities
+ * rather than picking one and being wrong half the time.
  */
-async function githubRelease(
-  repo: string,
-  includePrereleases: boolean
-): Promise<Release> {
-  const payload = await getJson(
-    `${GITHUB_API}/repos/${repo}/releases${
-      includePrereleases ? "?per_page=10" : "/latest"
-    }`,
-    { headers: { Accept: "application/vnd.github+json" } }
-  )
+async function githubRelease(repo: string): Promise<Release | null> {
+  let payload: unknown
+  try {
+    payload = await getJson(`${GITHUB_API}/repos/${repo}/releases/latest`, {
+      headers: { Accept: "application/vnd.github+json" },
+    })
+  } catch (error) {
+    if (error instanceof FeedError && error.status === 404) {
+      return null
+    }
+
+    throw error
+  }
 
   const release = Array.isArray(payload)
     ? (payload as GithubRelease[]).find((entry) => !entry.draft)
@@ -284,8 +323,9 @@ async function githubRelease(
 
   const version = release?.tag_name || release?.name
 
+  // An empty list is the other shape of "nothing published yet".
   if (!version) {
-    throw new Error("That repository has no published releases.")
+    return null
   }
 
   return {
@@ -300,8 +340,11 @@ const GITHUB_SHORTHAND = /^[\w.-]+\/[\w.-]+$/
 const GITHUB_URL = /^https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+)/i
 
 export type FeedKind =
-  | { kind: "none" }
-  | { kind: "github"; repo: string }
+  | {
+      kind: "github"
+      repo: string
+      /** Nothing was set; this is the built-in. */ builtIn: boolean
+    }
   | { kind: "json"; url: string }
 
 /**
@@ -310,16 +353,20 @@ export type FeedKind =
  * Exported because the settings screen says so under the field. Somebody who
  * pastes a repository URL should be able to see it was understood as a
  * repository before they run a check and wait for a failure.
+ *
+ * An empty setting is not "no feed" - it is "the one this build ships with".
+ * That distinction is what lets the repository move without every existing
+ * install being stuck on a stored empty string.
  */
 export function describeFeed(feed: string): FeedKind {
   const trimmed = feed.trim()
 
   if (!trimmed) {
-    return { kind: "none" }
+    return { kind: "github", repo: DEFAULT_APP_REPO, builtIn: true }
   }
 
   if (GITHUB_SHORTHAND.test(trimmed)) {
-    return { kind: "github", repo: trimmed }
+    return { kind: "github", repo: trimmed, builtIn: false }
   }
 
   const match = GITHUB_URL.exec(trimmed)
@@ -327,6 +374,7 @@ export function describeFeed(feed: string): FeedKind {
     return {
       kind: "github",
       repo: `${match[1]}/${match[2].replace(/\.git$/i, "")}`,
+      builtIn: false,
     }
   }
 
@@ -334,25 +382,19 @@ export function describeFeed(feed: string): FeedKind {
 }
 
 /**
- * The app's own newest release, from whatever the feed setting points at.
+ * The app's own newest release, from whatever the feed points at, or null when
+ * that feed has nothing published yet.
  *
  * Three forms are accepted because all three are things somebody will paste:
  * `owner/repo`, a github.com URL, and a plain JSON document. The last is
  * shaped like Tauri's updater manifest (`{ version, notes, pub_date }`), and a
  * bare `{ tag_name }` is read too so a GitHub API URL works as it is.
  */
-async function appRelease(
-  feed: string,
-  includePrereleases: boolean
-): Promise<Release> {
+async function appRelease(feed: string): Promise<Release | null> {
   const target = describeFeed(feed)
 
-  if (target.kind === "none") {
-    throw new Error("No release feed is set.")
-  }
-
   if (target.kind === "github") {
-    return githubRelease(target.repo, includePrereleases)
+    return githubRelease(target.repo)
   }
 
   const payload = (await getJson(target.url)) as
@@ -516,26 +558,29 @@ async function appReport(
     path: null,
   }
 
-  if (describeFeed(preferences.feedUrl).kind === "none") {
-    return {
-      ...base,
-      state: "unconfigured",
-      message:
-        "No release feed is set, so the app's own version is not checked. Add one below.",
-    }
-  }
+  const feed = describeFeed(preferences.feedUrl)
 
-  let release: Release
+  let release: Release | null
   try {
-    release = await appRelease(
-      preferences.feedUrl,
-      preferences.includePrereleases
-    )
+    release = await appRelease(preferences.feedUrl)
   } catch (error) {
     return {
       ...base,
       state: "error",
       message: error instanceof Error ? error.message : "The check failed.",
+    }
+  }
+
+  if (!release) {
+    // Both readings of an empty answer, because an anonymous caller cannot
+    // tell them apart - a private repository 404s exactly like an empty one.
+    return {
+      ...base,
+      state: "unknown",
+      message: `No releases were found${
+        feed.kind === "github" ? ` in ${feed.repo}` : ""
+      }. It may not have published one yet, or may not be public.`,
+      url: feed.kind === "github" ? `https://github.com/${feed.repo}` : null,
     }
   }
 
@@ -582,10 +627,7 @@ async function appReport(
 }
 
 /** yt-dlp's row - the one that explains most "it stopped working" reports. */
-async function ytDlpReport(
-  preferences: UpdatePreferences,
-  health: Health | null
-): Promise<ComponentReport> {
+async function ytDlpReport(health: Health | null): Promise<ComponentReport> {
   const base = {
     id: "yt-dlp" as const,
     name: "yt-dlp",
@@ -604,23 +646,24 @@ async function ytDlpReport(
     }
   }
 
-  if (!preferences.includeTools) {
-    return {
-      ...base,
-      state: "bundled",
-      message:
-        "Shipped with the service. Turn on tool checks to compare it with the latest release.",
-    }
-  }
-
-  let release: Release
+  let release: Release | null
   try {
-    release = await githubRelease(YT_DLP_REPO, preferences.includePrereleases)
+    release = await githubRelease(YT_DLP_REPO)
   } catch (error) {
     return {
       ...base,
       state: "error",
       message: error instanceof Error ? error.message : "The check failed.",
+    }
+  }
+
+  // yt-dlp has published for years, so an empty answer here is GitHub having
+  // a bad day rather than a project that has not shipped yet.
+  if (!release) {
+    return {
+      ...base,
+      state: "unknown",
+      message: "GitHub returned no releases for yt-dlp.",
     }
   }
 
@@ -681,7 +724,7 @@ export async function runUpdateCheck(
   // The two network calls run together; everything else is already in hand.
   const [app, ytDlp] = await Promise.all([
     appReport(preferences, installed),
-    ytDlpReport(preferences, health),
+    ytDlpReport(health),
   ])
 
   const serviceUp = health !== null
@@ -961,13 +1004,6 @@ export function requestUpdateCheck() {
     window.dispatchEvent(new CustomEvent(updateCheckRequestEvent))
   }
 }
-
-/** How long between automatic re-checks, in milliseconds. */
-export const checkIntervals = {
-  never: null,
-  daily: 24 * 60 * 60 * 1000,
-  weekly: 7 * 24 * 60 * 60 * 1000,
-} satisfies Record<UpdatePreferences["frequency"], number | null>
 
 /** "just now", "6 minutes ago", "3 days ago" - for the last-checked line. */
 export function describeAge(timestamp: number, now = Date.now()) {

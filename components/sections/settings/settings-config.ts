@@ -56,27 +56,26 @@ export type SettingsConfig = {
    * settings export. It has its own store in `lib/updates.ts`.
    */
   updates: {
-    /** Run a check shortly after the app opens. */
-    checkOnLaunch: boolean
-    /** How often to check again while the app stays open. */
-    frequency: "never" | "daily" | "weekly"
     /**
-     * Also ask about the tools the service ships with, which means yt-dlp.
+     * Run a check shortly after the app opens.
      *
-     * Separable from the app check because it is the one that reaches
-     * github.com on a schedule, and because the two answers have different
-     * urgencies: a stale app is a missed feature, a stale yt-dlp is downloads
-     * that have stopped working.
+     * The only schedule there is. A recurring timer was tried and taken back
+     * out: this is a desktop app that is opened when it is wanted, so launch
+     * is when the answer is worth having, and a check that fires at some
+     * unpredictable hour is one nobody is present to act on.
      */
-    includeTools: boolean
-    /** Count pre-releases as available updates. */
-    includePrereleases: boolean
+    checkOnLaunch: boolean
     /** Say something when a check finds an update, wherever you are. */
     notify: boolean
     /**
-     * Where this app's releases are published. Empty means the app's own
-     * version is not checked, and the screen says so rather than implying it
-     * passed. Accepts `owner/repo`, a github.com URL, or a JSON manifest URL.
+     * An override for where this app's releases are read from.
+     *
+     * Empty is the normal state: the feed this build ships with
+     * (`DEFAULT_APP_REPO` in `lib/updates.ts`) is used. Kept as an override
+     * rather than a default written in here so that moving the repository is a
+     * change to one constant, instead of something every stored config has to
+     * be migrated onto. Accepts `owner/repo`, a github.com URL, or the URL of
+     * a JSON manifest.
      */
     feedUrl: string
   }
@@ -187,13 +186,8 @@ export const defaultSettingsConfig: SettingsConfig = {
   },
   updates: {
     checkOnLaunch: true,
-    frequency: "daily",
-    includeTools: true,
-    includePrereleases: false,
     notify: true,
-    // Nothing is assumed about where this app is published. An invented
-    // address would fail every check with an error nobody could explain,
-    // where an empty one reports honestly that it was never asked.
+    // Empty means "the feed this build ships with", not "no feed".
     feedUrl: "",
   },
   network: {
@@ -324,12 +318,18 @@ function mergeSettingsConfig(
       ...defaultSettingsConfig.startup,
       ...parsed?.startup,
     },
+    // Named one key at a time rather than spread, so that settings this group
+    // used to have - a recurring frequency, per-tool switches - are dropped on
+    // the way in instead of living on invisibly in everyone's stored config
+    // and turning up again in an export.
     updates: {
-      ...defaultSettingsConfig.updates,
-      ...parsed?.updates,
+      checkOnLaunch:
+        parsed?.updates?.checkOnLaunch ??
+        defaultSettingsConfig.updates.checkOnLaunch,
+      notify: parsed?.updates?.notify ?? defaultSettingsConfig.updates.notify,
       // An imported config may carry anything here, and the value is put
-      // straight into a `fetch`. A non-string is dropped back to "not
-      // configured", which is the one safe reading of it.
+      // straight into a `fetch`. A non-string falls back to the built-in feed,
+      // which is the one safe reading of it.
       feedUrl:
         typeof parsed?.updates?.feedUrl === "string"
           ? parsed.updates.feedUrl
