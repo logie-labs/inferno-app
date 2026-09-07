@@ -129,6 +129,29 @@ function versionNote(report: ComponentReport) {
   }
 }
 
+/**
+ * How loudly a row's message is said, or null for a row that needs no saying.
+ *
+ * The states left out are the settled ones - current, bundled, pinned. Their
+ * messages are true but unremarkable ("Shipped with the app."), and printing
+ * them under every row would make the two that matter look the same as the
+ * five that do not.
+ */
+function messageTone(state: UpdateState) {
+  switch (state) {
+    case "outdated":
+      return "text-primary"
+    case "unavailable":
+    case "error":
+      return "text-destructive"
+    case "unknown":
+    case "unconfigured":
+      return "text-muted-foreground"
+    default:
+      return null
+  }
+}
+
 /** The tiny uppercase rule that heads each band of rows. */
 function GroupHeading({ title, note }: { title: string; note?: string }) {
   return (
@@ -157,6 +180,7 @@ function ComponentRow({
   const style = STATE_STYLE[report.state]
   const Icon = style.icon
   const note = versionNote(report)
+  const tone = messageTone(report.state)
   // Bound here so each handler closes over a string rather than a property
   // TypeScript cannot promise is still there when it runs.
   const releases = report.url
@@ -183,6 +207,13 @@ function ComponentRow({
           </Badge>
         </div>
         <p className="mt-0.5 text-xs text-muted-foreground">{report.purpose}</p>
+
+        {/* The reason, but only where there is one worth reading. A settled
+            row explains nothing beyond its badge; a row that is behind, gone
+            or unanswered is the whole reason somebody opened this screen. */}
+        {tone && report.message ? (
+          <p className={cn("mt-1 text-xs", tone)}>{report.message}</p>
+        ) : null}
       </div>
 
       <div className="shrink-0 @xl:w-36 @xl:text-right">
@@ -212,7 +243,11 @@ function ComponentRow({
           version it sat beside - which is the thing somebody came to read. */}
       <div className="flex shrink-0 items-center justify-end">
         {onSetFeed ? (
-          <RowAction label="Set the release feed" icon={RiRssLine} onClick={onSetFeed} />
+          <RowAction
+            label="Set the release feed"
+            icon={RiRssLine}
+            onClick={onSetFeed}
+          />
         ) : releases ? (
           <RowAction
             label={`Open ${report.name} releases`}
@@ -568,7 +603,7 @@ export function UpdatesSection({
                   <>
                     <GroupHeading
                       title="Tracked separately"
-                      note="Updates on its own schedule"
+                      note="Checked on its own"
                     />
                     {external.map((entry) => (
                       <ComponentRow key={entry.id} report={entry} />
