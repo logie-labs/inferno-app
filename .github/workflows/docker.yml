@@ -120,18 +120,21 @@ jobs:
           h = json.load(open('/tmp/health.json'))
           # /health reports each binary at the top level as
           # {path, source, version, available}.
-          missing = [n for n in ('ffmpeg', 'ffprobe')
+          #
+          # js_runtime is in this list and not treated as a nicety. Without it
+          # YouTube extraction degrades silently - adaptive formats vanish and
+          # the service still answers 200 to everything - so an image missing
+          # it passes every other check here while being materially broken.
+          # That is exactly what shipped in alpha.1.
+          missing = [n for n in ('ffmpeg', 'ffprobe', 'js_runtime')
                      if not (h.get(n) or {}).get('available')]
           if missing:
               print('::error::missing from image: ' + ', '.join(missing))
               print(json.dumps(h, indent=2))
               sys.exit(1)
-          print('ffmpeg', h['ffmpeg']['version'], '/ ffprobe ok')
-          # quickjs is optional - the Dockerfile tolerates it being absent -
-          # so report it rather than failing on it.
-          js = h.get('js_runtime') or {}
-          print('js runtime:', js.get('name'), js.get('version')
-                if js.get('available') else '(unavailable - some extractors limited)')
+          for n in ('ffmpeg', 'ffprobe', 'js_runtime'):
+              b = h[n]
+              print(f\"  {n}: {b.get('name') or n} {b.get('version')} ({b.get('source')})\")
           "
 
           # The frontend has to be served, not just built - INFERNO_WEB_ROOT

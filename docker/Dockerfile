@@ -88,17 +88,41 @@ FROM python:3.12-slim-bookworm AS runtime
 # own name - the naming trap `service/TAURI_INTEGRATION.md` §2.1 warns about
 # does not arise when the distribution does the installing.
 #
-# quickjs (`qjs`) is what yt-dlp uses to solve the signature challenges some
-# extractors serve. Genuinely optional - most downloads never need it, and it
-# is not in every Debian mirror - so a missing package must not fail the build.
-# `GET /health` reports whether it resolved; check there rather than guessing.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ffmpeg \
       ca-certificates \
- && (apt-get install -y --no-install-recommends quickjs || \
-     echo "quickjs unavailable - some extractors will be limited; see /health") \
  && rm -rf /var/lib/apt/lists/*
+
+# The JS runtime, which is not optional however much it looks like it.
+#
+# yt-dlp needs it to solve YouTube's signature challenges. Without one,
+# extraction degrades *silently*: adaptive (video-only and audio-only) formats
+# simply go missing instead of raising, so you get a working-looking service
+# that can only fetch low-quality muxed streams. service/vendor/README.md
+# spells this out, and a first attempt here got it wrong - `apt-get install
+# quickjs` tolerated with `|| true`, which looked prudent and shipped an image
+# with no runtime at all, because quickjs is in trixie and sid but not in
+# bookworm. Hence: fetch it explicitly, and let the build fail if that fails.
+#
+# quickjs-ng, not Bellard's original - it is the fork yt-dlp targets and the one
+# that publishes prebuilt binaries. Pinned to the same version the desktop app
+# vendors, so both products resolve identically.
+ARG TARGETARCH
+ARG QUICKJS_VERSION=v0.16.2
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) qjs_arch=x86_64 ;; \
+      arm64) qjs_arch=aarch64 ;; \
+      *) echo "no quickjs-ng build for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/quickjs-ng/quickjs/releases/download/${QUICKJS_VERSION}/qjs-linux-${qjs_arch}"; \
+    echo "Fetching $url"; \
+    python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/usr/local/bin/qjs')" "$url"; \
+    chmod +x /usr/local/bin/qjs; \
+    # Proves it runs on this architecture rather than merely downloading - a
+    # wrong-arch binary is an exec format error at first use, not at install.
+    qjs -e 'console.log("quickjs-ng ok")'
 
 # Install the service from source. Copying only `service/` keeps the frontend's
 # source out of the runtime image entirely - what ships is the built output.
