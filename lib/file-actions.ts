@@ -28,10 +28,10 @@ import {
 /**
  * What a call site knows about the file it wants to act on.
  *
- * Both halves are optional because which one exists depends on the product:
- * the browser only ever has the API's `url`, and a local path is meaningless
- * to it; the desktop prefers the path, and falls back to the URL if a file was
- * never recorded locally. A caller passes what it has.
+ * Which fields exist depends on the product and the call site: the desktop has
+ * an absolute `path` and prefers it, while the browser needs a path relative to
+ * the download root. A caller passes what it has, and `contentPath` decides
+ * what to do with it.
  */
 export type FileTarget = {
   /** Relative url from the API, as carried on `ServiceFile.url`. */
@@ -47,8 +47,7 @@ export type FileTarget = {
    * Optional because not every caller has it: the browse dialog does - every
    * listing entry carries one - while the queue holds absolute paths from the
    * job API and has to subtract the root, which it can only do once `/health`
-   * has reported it. Without one, opening falls back to the raw file URL,
-   * which still works and just skips the player.
+   * has reported it. Without one, `contentPath` falls back to the bare name.
    */
   relativePath?: string | null
 }
@@ -97,6 +96,34 @@ function notAvailable(what: string): never {
 }
 
 /**
+ * How to address a finished file, in preference order.
+ *
+ * The job's own url - `/api/v1/downloads/{id}/files/{name}` - is the obvious
+ * choice and the wrong one. Jobs live in memory and do not survive a restart
+ * (SPEC §2); the file on the volume does. So that url starts returning
+ * `job_not_found` while the file it names is still sitting there, and a tab
+ * left open across a service restart turns every Open and Download into a page
+ * of raw JSON. The file's own path has no such expiry.
+ *
+ * Falling back to the bare name is a guess - it assumes the download landed in
+ * the root rather than a subfolder - but a checked one: the viewer lists the
+ * folder and says so plainly when the file is not there, which is a better
+ * outcome than an error envelope rendered as a document.
+ */
+function contentPath(file: FileTarget): string | null {
+  return file.relativePath ?? file.name ?? null
+}
+
+/** The API url that serves a file's bytes, keyed on path rather than job. */
+export function contentUrl(file: FileTarget): string | null {
+  const path = contentPath(file)
+
+  return path
+    ? `/api/v1/files/content?path=${encodeURIComponent(path)}`
+    : (file.url ?? null)
+}
+
+/**
  * Show the file to the person who asked for it.
  *
  * Desktop: the OS opens it in their default application.
@@ -109,9 +136,11 @@ function notAvailable(what: string): never {
  * The viewer wraps the same bytes in a player and can explain itself when the
  * browser has no decoder.
  *
- * Falls back to the raw URL when the caller has no root-relative path, which
- * is the one thing the viewer route needs. Better a tab that behaves like it
- * used to than an action that does nothing.
+ * Always the viewer, never the job's own url. That url expires when the job
+ * does - which is on every service restart, jobs being in memory - while the
+ * file it names is still on the volume, so it turns into a page of raw JSON
+ * exactly when someone returns to a tab they left open. `contentPath` explains
+ * the ordering.
  *
  * `noopener,noreferrer` because the opened tab has no business reaching back
  * into this one through `window.opener`.
@@ -121,21 +150,14 @@ export async function openFile(client: InfernoClient | null, file: FileTarget) {
     return openPath(file.path ?? "")
   }
 
-  if (file.relativePath) {
-    const href = `/view/${file.relativePath
-      .split("/")
-      .map(encodeURIComponent)
-      .join("/")}`
-    window.open(href, "_blank", "noopener,noreferrer")
+  const path = contentPath(file)
 
-    return
-  }
-
-  if (!client || !file.url) {
+  if (!path) {
     notAvailable("Opening this file")
   }
 
-  window.open(client.href(file.url), "_blank", "noopener,noreferrer")
+  const href = `/view/${path.split("/").map(encodeURIComponent).join("/")}`
+  window.open(href, "_blank", "noopener,noreferrer")
 }
 
 /**
@@ -160,12 +182,14 @@ export async function downloadFile(
     notAvailable("Downloading")
   }
 
-  if (!client || !file.url) {
+  const url = contentUrl(file)
+
+  if (!client || !url) {
     notAvailable("Downloading this file")
   }
 
   const anchor = document.createElement("a")
-  anchor.href = client.href(file.url)
+  anchor.href = client.href(url)
   anchor.download = file.name ?? ""
   anchor.rel = "noopener"
   // Firefox requires the element to be in the document for a click to count.
