@@ -37,6 +37,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # TEMPORARY - diagnosing an `npm ci` failure inside the image build whose
+      # logs are not readable without a token. Running it natively on the
+      # runner, which is the same Linux, and echoing the tail as an annotation.
+      # Remove once the cause is known.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Diagnose npm ci natively
+        run: |
+          set +e
+          npm ci > npm-out.txt 2>&1
+          code=$?
+          echo "exit code: $code"
+          tail -n 40 npm-out.txt
+          if [ $code -ne 0 ]; then
+            body=$(tail -c 2500 npm-out.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error::npm ci exited $code%0A%0A$body"
+            exit 1
+          fi
+
       # QEMU + Buildx give us arm64 alongside amd64, which is what makes this
       # runnable on a Raspberry Pi or an ARM VPS rather than only on x86.
       - uses: docker/setup-qemu-action@v3
