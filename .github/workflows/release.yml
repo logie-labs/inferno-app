@@ -128,8 +128,14 @@ jobs:
           service/.venv/Scripts/python.exe -m pip install --upgrade pip
           service/.venv/Scripts/pip.exe install -e "service[dev]" pyinstaller
 
+      # `npm install` for the same reason the Dockerfile uses it: `npm ci`
+      # refuses on this lockfile, which is missing the transitive @emnapi
+      # packages that the wasm32 fallback variants pull in. It turns out not to
+      # be Linux-specific - a clean Windows runner hits it too, so the local
+      # tree is simply hiding it. The fix is a regenerated lockfile, and the
+      # Dockerfile comment explains why that is not being done here.
       - name: Install npm dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       # Fails loudly if any of the three did not land where it belongs, before
       # spending thirty minutes on a Rust build that would produce a broken
