@@ -23,8 +23,14 @@
 # `next.config.ts` sets `output: "export"`, so this produces a directory of
 # static files rather than a Node server. Nothing from this stage's toolchain
 # reaches the final image.
+#
+# Pinned to BUILDPLATFORM - the machine doing the building - rather than
+# TARGETPLATFORM. The output is HTML, CSS and JavaScript, which is identical
+# whatever the target architecture, so building it once natively is not a
+# shortcut: emulating a Node toolchain under QEMU to produce byte-identical
+# static files would multiply the build time of the arm64 image for nothing.
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS web
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
 
 WORKDIR /build
 
