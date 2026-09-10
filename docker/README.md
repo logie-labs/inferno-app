@@ -47,21 +47,34 @@ Read this before deploying anything.
 - Settings, persisted to `/data`.
 - Files land on the `/data` volume and are served by the API.
 
+**File actions**, which the desktop does through the OS and the browser cannot:
+
+- **Open** becomes *Open in a new tab* — renamed, not just rewired, because
+  "Open" in a browser invites the reasonable guess that something opens on
+  *your* machine. The browser decides what happens with it: an mp4 plays
+  inline, a mkv downloads. That is the browser's call to make and it makes it
+  from the content type, which is why the image installs `media-types`.
+- **Download** saves the file to the machine the browser is on. Container only:
+  on the desktop the file is already there, so this would copy it beside
+  itself.
+- **Open file location** opens a **file browser dialog** over
+  `GET /api/v1/files`, listing the folder with that file marked. It navigates
+  into subfolders, and each file gets open and download buttons. The server
+  bounds every path to the download folder — absolute or relative, symlinks
+  resolved before the check — so it cannot browse the host.
+
+The library screen does not appear at all: it is backed by SQLite through Tauri
+and returns nothing in a browser. That is why it needed no gating.
+
 ### Not built yet
 
 - **Cloud storage providers.** Google Drive, OneDrive and the rest are not
-  implemented. Downloads currently stop at the `/data` volume.
-- **The capability pass on local-only UI.** `lib/deployment.ts` exports a
-  `capabilities` object, and so far only the toolbar reads it. Nine other
-  files still call into Tauri-only commands — "Open folder", "Reveal in
-  explorer", the native directory picker, the Soundpad and Spotify settings
-  sections. In a browser those controls are visible and do nothing.
-
-Those two are one job, not two, which is why neither is half-done here. The
-right cloud behaviour for "Open folder" is *open the Drive folder*, and for the
-directory picker it is *pick a Drive folder* — both need the storage layer to
-exist before they can be written. Gating them off first would mean writing the
-same code twice.
+  implemented. Downloads stop at the `/data` volume.
+- **The native directory picker**, in Settings' save locations, and the
+  Soundpad and Spotify sections. Still visible, still inert. The picker is
+  waiting on the storage layer for the same reason as before: its right cloud
+  behaviour is *pick a Drive folder*, so gating it off now means writing it
+  twice.
 
 ### Cannot work in a container, ever
 

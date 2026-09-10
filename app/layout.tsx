@@ -5,6 +5,7 @@ import { CommandPalette } from "@/components/command-palette"
 import { ContextMenuGuard } from "@/components/context-menu-guard"
 import { SpotifyConflictDialog } from "@/components/spotify-conflict-dialog"
 import { ActiveSectionProvider } from "@/components/sections/active-section-context"
+import { FileBrowserProvider } from "@/components/sections/downloads/file-browser-dialog"
 import { InfernoServiceProvider } from "@/components/sections/downloads/service-context"
 import { TaskbarProgress } from "@/components/taskbar-progress"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -44,6 +45,10 @@ export default function RootLayout({
                 on another screen, and returning to the queue should show what
                 is there rather than reconnecting and rebuilding it. */}
             <InfernoServiceProvider>
+              {/* Inside the service provider, which owns the client it lists
+                  files with. Renders nothing at all in the desktop build,
+                  where the OS file manager does this job properly. */}
+              <FileBrowserProvider>
               <ActiveSectionProvider>
                 <WindowToolbar />
                 <main className="min-h-0 overflow-auto">{children}</main>
@@ -64,6 +69,7 @@ export default function RootLayout({
                     screen. */}
                 <SpotifyConflictDialog />
               </ActiveSectionProvider>
+              </FileBrowserProvider>
             </InfernoServiceProvider>
           </TooltipProvider>
           <Toaster position="bottom-center" />

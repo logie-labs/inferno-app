@@ -86,6 +86,31 @@ export type ServiceFile = {
   path?: string | null
 }
 
+/** One row in a directory listing from `/api/v1/files`. */
+export type FileEntry = {
+  name: string
+  /** Relative to the download root - what to pass back to browse or fetch. */
+  path: string
+  type: "file" | "directory"
+  /** Null for a directory; a directory's size is not a thing worth computing. */
+  size: number | null
+  mime?: string | null
+  modified?: number | null
+  /** Null for a directory. Relative, like every other url the API returns. */
+  url: string | null
+}
+
+export type FileListing = {
+  /** Relative to the root; empty string *is* the root. */
+  path: string
+  /** Null at the root, so "up" has exactly one representation. */
+  parent: string | null
+  /** For display. "Downloads" at the root, the folder's own name below it. */
+  name: string
+  entries: FileEntry[]
+  count: number
+}
+
 export type Chapter = {
   title?: string | null
   start_time?: number | null
@@ -755,11 +780,43 @@ export class InfernoClient {
 
   /** Files come from the API, never from reading the download directory. */
   fileUrl(file: ServiceFile) {
-    const query = this.endpoint.token
-      ? `?token=${encodeURIComponent(this.endpoint.token)}`
-      : ""
+    return this.href(file.url)
+  }
 
-    return `${this.endpoint.base_url}${file.url}${query}`
+  /**
+   * An absolute, fetchable URL for a path the API handed back.
+   *
+   * Every `url` in a response is relative, so it stays correct behind a proxy
+   * or a different host. This is where it becomes absolute, and the one place
+   * the token is appended - in the query string rather than a header, because
+   * these URLs are handed to the browser itself (a new tab, a download, an
+   * `<img src>`), and none of those can set one.
+   */
+  href(url: string) {
+    if (!this.endpoint.token) {
+      return `${this.endpoint.base_url}${url}`
+    }
+
+    // The API builds some of these with a query string already.
+    const separator = url.includes("?") ? "&" : "?"
+
+    return `${this.endpoint.base_url}${url}${separator}token=${encodeURIComponent(
+      this.endpoint.token
+    )}`
+  }
+
+  /**
+   * One directory inside the download folder.
+   *
+   * The server resolves and bounds the path; an empty string is the root. A
+   * browser client has no filesystem of its own, so this is what stands in for
+   * "show me where this file is" - see the `/api/v1/files` route for why it
+   * exists at all rather than being a desktop-only trick.
+   */
+  listFiles(path = "") {
+    const query = new URLSearchParams({ path })
+
+    return this.request<FileListing>(`/api/v1/files?${query}`)
   }
 }
 

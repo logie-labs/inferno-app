@@ -57,6 +57,21 @@ export const capabilities = {
   revealInFileManager: isLocal,
   /** The native directory picker, and the local paths it returns. */
   localFilesystem: isLocal,
+  /**
+   * Saving a finished file to the machine the browser is on.
+   *
+   * Container only, and not an oversight in the desktop build: there the file
+   * is already on that machine, so "download" would copy it beside itself.
+   */
+  downloadToBrowser: isCloud,
+  /**
+   * Browsing the server's download folder in a dialog.
+   *
+   * The container's answer to "open file location". The desktop has a real file
+   * manager and should keep using it - a dialog would be a worse version of
+   * something the OS already does well.
+   */
+  fileBrowser: isCloud,
   /** Soundpad's remote control - a Windows desktop application. */
   soundpad: isLocal,
   /** Scanning the local Spotify install for offline tracks. */

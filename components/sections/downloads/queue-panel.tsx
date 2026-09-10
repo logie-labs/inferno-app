@@ -7,8 +7,9 @@ import {
   RiEraserLine,
   RiFileCopyLine,
   RiFileSearchLine,
-  RiFolderOpenLine,
+  RiDownload2Line,
   RiExternalLinkLine,
+  RiFolderOpenLine,
   RiInformationLine,
   RiLinkM,
   RiPlayCircleLine,
@@ -35,6 +36,8 @@ import {
   totals,
   type JobTracker,
 } from "@/lib/inferno-progress"
+import { capabilities } from "@/lib/deployment"
+import { downloadFile, openFile } from "@/lib/file-actions"
 import {
   describeError,
   describeErrorBody,
@@ -54,6 +57,7 @@ import { Thumbnail } from "./thumbnail"
 import { VideoDetailsDialog } from "./video-details-dialog"
 import { LocateFileDialog } from "./locate-file-dialog"
 import { RuleButton } from "./rule-button"
+import { useFileBrowser } from "./file-browser-dialog"
 import { useInfernoService } from "./service-context"
 
 /**
@@ -183,7 +187,9 @@ function QueueRowItem({
   onShowDetails: (video: VideoInfo) => void
   onConfirm: (request: ConfirmRequest) => void
 }) {
-  const { cancel, remove, retry, entryFor, destroy } = useInfernoService()
+  const { cancel, remove, retry, entryFor, destroy, client } =
+    useInfernoService()
+  const fileBrowser = useFileBrowser()
   const { job } = tracker
 
   const failed = job.status === "failed" || job.status === "cancelled"
@@ -324,17 +330,40 @@ function QueueRowItem({
   }
 
   if (done && location) {
+    const target = {
+      url: primary?.url,
+      // The library's path wins where it has one: it knows where the file is
+      // now, not only where it was put.
+      path: entry?.file_path ?? primary?.path,
+      name: primary?.name,
+    }
+
     file.push({
-      label: "Open",
+      // Named for what it does rather than kept uniform. In a browser this
+      // opens a tab, and calling that "Open" invites the reasonable guess that
+      // it opens in a player on this machine.
+      label: capabilities.localFilesystem ? "Open" : "Open in a new tab",
       hint: primary?.name ?? "Open the downloaded file",
-      icon: RiPlayCircleLine,
+      icon: capabilities.localFilesystem
+        ? RiPlayCircleLine
+        : RiExternalLinkLine,
       run: () =>
         void checkThenRun(() => {
-          void openPath(entry?.file_path ?? primary?.path ?? "").catch(
-            reportFailure
-          )
+          void openFile(client, target).catch(reportFailure)
         }),
     })
+
+    if (capabilities.downloadToBrowser) {
+      file.push({
+        label: "Download",
+        hint: "Save it to this device",
+        icon: RiDownload2Line,
+        run: () =>
+          void checkThenRun(() => {
+            void downloadFile(client, target).catch(reportFailure)
+          }),
+      })
+    }
   }
 
   if (location) {
@@ -342,8 +371,18 @@ function QueueRowItem({
       label: "Open file location",
       hint: location,
       icon: RiFolderOpenLine,
-      run: () =>
-        void checkThenRun(() => void revealPath(location).catch(reportFailure)),
+      run: () => {
+        // The browser has no file manager to hand this to, so it gets the
+        // dialog instead - and needs no existence check first, because the
+        // listing is the check: a file that is gone simply is not in it.
+        if (capabilities.fileBrowser) {
+          fileBrowser.reveal(primary?.path ?? location)
+
+          return
+        }
+
+        void checkThenRun(() => void revealPath(location).catch(reportFailure))
+      },
     })
     file.push({
       label: "Copy file location",
@@ -656,6 +695,7 @@ export function QueuePanel() {
   // subscribed once, rather than letting the effect re-run: an effect with no
   // dependency array would add and remove a window listener several times a
   // second for the whole of every download.
+  const panelFileBrowser = useFileBrowser()
   const queueActions = useRef({ cancelAll, retryErrors, clearFinished, health })
   useEffect(() => {
     queueActions.current = { cancelAll, retryErrors, clearFinished, health }
@@ -671,6 +711,15 @@ export function QueuePanel() {
         "retry-errors": current.retryErrors,
         "clear-finished": current.clearFinished,
         "open-folder": () => {
+          // In the container this is the whole point of the browser dialog,
+          // and it needs no path from /health to open - the API roots the
+          // listing at the download folder itself.
+          if (capabilities.fileBrowser) {
+            panelFileBrowser.browse()
+
+            return
+          }
+
           const folder = current.health?.download_dir
           if (!folder) {
             toast.error("The service has not reported a download folder yet.")
@@ -693,7 +742,12 @@ export function QueuePanel() {
     return () => {
       window.removeEventListener("inferno-app:queue-action", onAction)
     }
-  }, [])
+    // Everything else this handler needs it reads through `queueActions`, a
+    // ref, precisely so the listener is bound once. The browser handle is the
+    // exception: it is stable by construction (memoised in the provider, and a
+    // shared constant where there is none), so depending on it costs nothing
+    // and keeps the rule honest rather than silenced.
+  }, [panelFileBrowser])
 
   return (
     <div className="flex h-full min-w-0 flex-col gap-3 p-4">

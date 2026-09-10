@@ -88,10 +88,16 @@ FROM python:3.12-slim-bookworm AS runtime
 # own name - the naming trap `service/TAURI_INTEGRATION.md` §2.1 warns about
 # does not arise when the distribution does the installing.
 #
+# media-types provides /etc/mime.types, which the slim image omits and Python's
+# `mimetypes` reads on Linux. Without it `.mkv` and `.m4a` resolve to nothing,
+# the API falls back to application/octet-stream, and every "open in a new tab"
+# becomes a forced download instead of playing in the browser. Two hundred
+# kilobytes to make the file routes tell the truth about what they are serving.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ffmpeg \
       ca-certificates \
+      media-types \
  && rm -rf /var/lib/apt/lists/*
 
 # The JS runtime, which is not optional however much it looks like it.

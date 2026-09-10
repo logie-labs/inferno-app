@@ -8,6 +8,7 @@ path — anything they can do, a third-party tool can do the same way (SPEC §1)
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import os
 import platform
 import re
@@ -15,6 +16,7 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Literal
+from urllib.parse import quote
 
 from fastapi import Body, Depends, FastAPI, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
@@ -728,6 +730,140 @@ def _install_routes(application: FastAPI) -> None:
         path = ctx.jobs.resolve_file(job, name)
         mime = next((f.get("mime") for f in job.files if f.get("name") == name), None)
         return _serve_file(path, request, mime)
+
+    # --- browsing the output directory --------------------------------------
+    #
+    # A browser client has no filesystem. "Open file location" on the desktop
+    # hands the path to the OS file manager; in a browser there is nothing to
+    # hand it to, so the directory has to be something the client can *ask for*.
+    # SPEC §1: the answer to "the app needs something the API cannot express" is
+    # to grow the API, not to add a private channel for one client.
+    #
+    # Rooted at the download directory and never above it. Two separate guards,
+    # because they fail differently: `_resolve_browse_path` rejects a traversal
+    # attempt, and resolving symlinks before the check means a link pointing out
+    # of the tree is caught rather than followed.
+
+    def _resolve_browse_path(ctx: ServiceContext, relative: str) -> Path:
+        root = ctx.settings.resolved_download_dir()
+        if not relative:
+            return root
+
+        # Absolute paths are accepted as well as root-relative ones, and the
+        # bounds check below is what makes that safe rather than a hole. It
+        # exists because the job API hands clients absolute paths - `files[].
+        # path`, `job.directory` - and making every caller subtract the root
+        # before asking about one would put the same arithmetic, and the same
+        # chance of getting it wrong, in each of them. The server knows where
+        # its own root is.
+        candidate = Path(relative)
+        target = (candidate if candidate.is_absolute() else root / relative.strip("/")).resolve()
+
+        # `resolve()` on both sides, so the comparison is between real paths and
+        # a symlink cannot smuggle the target outside the root.
+        if target != root and not target.is_relative_to(root):
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "Path is outside the download directory.",
+                detail={"path": relative},
+            )
+        return target
+
+    def _browse_entry(root: Path, path: Path) -> dict[str, Any]:
+        relative = path.relative_to(root).as_posix()
+        stat = path.stat()
+        if path.is_dir():
+            return {
+                "name": path.name,
+                "path": relative,
+                "type": "directory",
+                "size": None,
+                "modified": stat.st_mtime,
+                "url": None,
+            }
+        return {
+            "name": path.name,
+            "path": relative,
+            "type": "file",
+            "size": stat.st_size,
+            "mime": mimetypes.guess_type(path.name)[0],
+            "modified": stat.st_mtime,
+            "url": f"/api/v1/files/content?path={quote(relative)}",
+        }
+
+    @application.get(
+        "/api/v1/files",
+        dependencies=guarded,
+        responses=_ERROR_RESPONSES,
+        tags=["files"],
+        summary="List a directory inside the download folder",
+    )
+    async def list_files(request: Request, path: str = Query("")) -> dict[str, Any]:
+        ctx = _context(request)
+        if not ctx.settings.serve_files:
+            raise ServiceError(
+                ErrorCode.FILE_SERVING_DISABLED,
+                "File serving is disabled on this server (SERVE_FILES=false).",
+            )
+        root = ctx.settings.resolved_download_dir()
+        target = _resolve_browse_path(ctx, path)
+        if not target.is_dir():
+            raise ServiceError(
+                ErrorCode.FILE_NOT_FOUND,
+                "No such directory.",
+                detail={"path": path},
+            )
+
+        entries = []
+        for child in target.iterdir():
+            try:
+                entries.append(_browse_entry(root, child))
+            except OSError:
+                # A file that vanished between iterdir and stat. Skipping it is
+                # more useful than failing the whole listing over one entry.
+                continue
+        # Directories first, then by name - the order every file manager uses,
+        # done here so every client agrees without each sorting it again.
+        entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
+
+        relative = "" if target == root else target.relative_to(root).as_posix()
+        parent = None
+        if relative:
+            parent = str(Path(relative).parent.as_posix())
+            parent = "" if parent == "." else parent
+
+        return {
+            "path": relative,
+            "parent": parent,
+            "name": target.name if relative else "Downloads",
+            "entries": entries,
+            "count": len(entries),
+        }
+
+    @application.get(
+        "/api/v1/files/content",
+        dependencies=guarded,
+        responses={
+            **_ERROR_RESPONSES,
+            200: {"content": {"application/octet-stream": {}}, "description": "The file"},
+            206: {"content": {"application/octet-stream": {}}, "description": "A byte range"},
+        },
+        tags=["files"],
+        summary="Fetch any file inside the download folder (supports HTTP Range)",
+    )
+    async def get_file_by_path(request: Request, path: str = Query(...)) -> Response:
+        ctx = _context(request)
+        if not ctx.settings.serve_files:
+            raise ServiceError(
+                ErrorCode.FILE_SERVING_DISABLED,
+                "File serving is disabled on this server (SERVE_FILES=false).",
+            )
+        target = _resolve_browse_path(ctx, path)
+        if not target.is_file():
+            raise ServiceError(
+                ErrorCode.FILE_NOT_FOUND, "No such file.", detail={"path": path}
+            )
+        return _serve_file(target, request, mimetypes.guess_type(target.name)[0])
 
     # --- the minimal test client (an ordinary API consumer) ----------------
 
