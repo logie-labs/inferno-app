@@ -22,9 +22,9 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
-import { useInfernoService } from "@/components/sections/downloads/service-context"
-import { FolderField } from "@/components/ui/folder-field"
 import { TokenInput } from "@/components/ui/token-input"
+
+import { SaveLocations } from "./save-locations"
 import { getAppVersion } from "@/lib/app-version"
 import { CASE_STYLES, previewTemplate, TOKENS } from "@/lib/filename-template"
 
@@ -89,37 +89,6 @@ export function AppearanceSection({
   )
 }
 
-/**
- * The save-location field, and the service subscription it needs.
- *
- * Its own component so that subscription stops here. The service context
- * carries the live job list, so it changes on every progress frame of every
- * download - and a section that reads it re-renders at that rate too, which
- * is a whole settings screen rebuilt ten times a second to learn a folder
- * name that never changes.
- */
-function SaveLocationField({
-  config,
-  updateConfig,
-}: Pick<SettingsSectionComponentProps, "config" | "updateConfig">) {
-  // The same folder the configure panel shows, from the same place, so the
-  // two fields are not merely wired to one setting but described identically.
-  const { health } = useInfernoService()
-
-  return (
-    <FolderField
-      value={config.downloads.location}
-      fallback={health?.download_dir ?? undefined}
-      onValueChange={(location) =>
-        updateConfig((current) => ({
-          ...current,
-          downloads: { ...current.downloads, location },
-        }))
-      }
-    />
-  )
-}
-
 export function DownloadsSettingsSection({
   config,
   updateConfig,
@@ -129,17 +98,18 @@ export function DownloadsSettingsSection({
       title="Downloads"
       description="Where finished files land and how many run at once."
     >
-      {/* Its own block rather than a `SettingsFieldRow`: the answer under the
-          field needs the full width, and squeezed into a row's right-hand
-          column it wrapped after three words. */}
-      <div className="flex flex-col gap-2 border bg-muted/20 p-3">
+      {/* Its own block rather than a `SettingsFieldRow`: a list needs the full
+          width, and the answer under each row wrapped after three words when
+          this was a single field in a row's right-hand column. */}
+      <div className="flex flex-col gap-2">
         <div className="space-y-0.5">
-          <div className="text-sm font-medium">Save location</div>
+          <div className="text-sm font-medium">Save locations</div>
           <p className="text-xs text-muted-foreground">
-            Where finished downloads are moved once they are complete.
+            Where finished downloads are moved once they are complete. Keep as
+            many folders as you like and pick the one in use.
           </p>
         </div>
-        <SaveLocationField config={config} updateConfig={updateConfig} />
+        <SaveLocations config={config} updateConfig={updateConfig} />
       </div>
 
       <SettingsFieldRow
@@ -164,8 +134,8 @@ export function DownloadsSettingsSection({
         <div className="space-y-0.5">
           <div className="text-sm font-medium">Filename template</div>
           <p className="text-xs text-muted-foreground">
-            Type a token between {"{ "} and {"}"} to pick a token, or click one below. Everything else
-            is used literally.
+            Type a token between {"{ "} and {"}"} to pick a token, or click one
+            below. Everything else is used literally.
           </p>
         </div>
 

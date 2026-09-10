@@ -406,7 +406,10 @@ mod tests {
 
     #[test]
     fn a_free_name_is_used_as_it_is() {
-        let dir = std::env::temp_dir().join("inferno-spotify-free");
+        // Not "inferno-spotify-free": `fixture("free")` builds that exact
+        // path and removes it on the way in, so the two tests were deleting
+        // each other's scratch folder whenever they overlapped.
+        let dir = std::env::temp_dir().join("inferno-spotify-free-name");
         let _ = std::fs::create_dir_all(&dir);
 
         assert_eq!(

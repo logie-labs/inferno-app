@@ -339,6 +339,44 @@ export function LibraryRow({
               </span>
             ) : null}
           </div>
+
+          {/* Where it actually landed. Worth a line of its own rather than
+              only living on the menu: the output template can put a file
+              somewhere the download settings do not obviously imply, and
+              "where did that go" is the question this row is asked most.
+              Truncated from the tail, which keeps the folder - the half
+              somebody is reading for - while the file name is already the
+              title above.
+
+              Not uppercased like the line above it. That line is three short
+              labels and reads fine shouted; a path is neither. */}
+          {entry.file_path ? (
+            missing ? (
+              // No button while the file is gone: revealing it would fail,
+              // and the row already offers the one thing that helps.
+              <span
+                title={entry.file_path}
+                className="max-w-full self-start truncate font-mono text-[9px] tracking-[0.04em] text-muted-foreground/70"
+              >
+                {entry.file_path}
+              </span>
+            ) : (
+              <button
+                type="button"
+                title={`${entry.file_path}
+Show in folder`}
+                onClick={() =>
+                  void revealPath(entry.file_path ?? "").catch(reportFailure)
+                }
+                className="flex max-w-full min-w-0 items-center gap-1 self-start font-mono text-[9px] tracking-[0.04em] text-muted-foreground/70 transition-colors hover:text-foreground"
+              >
+                <RiFolderOpenLine aria-hidden className="size-2.5 shrink-0" />
+                <span className="truncate underline decoration-dotted underline-offset-2">
+                  {entry.file_path}
+                </span>
+              </button>
+            )
+          ) : null}
         </div>
 
         <div className="shrink-0">

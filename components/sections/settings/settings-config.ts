@@ -12,7 +12,24 @@ export type SettingsConfig = {
     themeAnimation: boolean
   }
   downloads: {
+    /**
+     * The folder in use, and the one every other part of the app reads.
+     *
+     * Empty means the service's own folder, which is the answer before
+     * anybody has chosen anything. `folders` is the list this is chosen
+     * *from*; this string stays the single source of truth so nothing else
+     * has to learn about the list.
+     */
     location: string
+    /**
+     * Folders kept on hand to switch between.
+     *
+     * Deliberately not a list of *names*: a saved folder is a path and where
+     * it came from, nothing else. Naming them is a separate feature and
+     * pretending to have it now would mean storing a label that immediately
+     * disagrees with the folder it points at.
+     */
+    folders: DownloadFolder[]
     concurrentDownloads: number
     /**
      * Friendly `{title} [{id}]` form. The extension is never part of it -
@@ -142,6 +159,20 @@ export type SettingsConfig = {
   keybinds: Record<string, string>
 }
 
+/** One folder in the save-location list. */
+export type DownloadFolder = {
+  /**
+   * Where the path came from: the id of a folder the OS named
+   * (`downloads`, `temporary`, ...) or `custom` for one typed or picked.
+   *
+   * Kept because it is the only thing that survives a move. A preset can be
+   * re-resolved on a machine whose Downloads folder is somewhere else; a
+   * custom path is exactly what was asked for and is left alone.
+   */
+  source: string
+  path: string
+}
+
 export type SettingsConfigUpdate = (
   updater: (current: SettingsConfig) => SettingsConfig
 ) => void
@@ -162,6 +193,7 @@ export const defaultSettingsConfig: SettingsConfig = {
   },
   downloads: {
     location: "",
+    folders: [],
     concurrentDownloads: 3,
     filenameTemplate: "{title} [{id}]",
     filenameCase: "original",
@@ -260,6 +292,39 @@ function clamp(value: number, min: number, max: number) {
  * invisible in the UI but still counts as a conflict, so rebinding its chord
  * would be refused for a reason nobody could see.
  */
+/**
+ * The saved folder list, taken at arm's length.
+ *
+ * An imported config can carry anything at all here, and a row with no path
+ * would render as a blank line that selects nothing. Duplicates go too: two
+ * rows for one folder are two ways to pick the same thing, and only one of
+ * them can ever look selected.
+ */
+function mergeDownloadFolders(stored: unknown): DownloadFolder[] {
+  if (!Array.isArray(stored)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+
+  return stored.flatMap((entry) => {
+    const path =
+      typeof (entry as DownloadFolder)?.path === "string"
+        ? (entry as DownloadFolder).path.trim()
+        : ""
+
+    if (!path || seen.has(path)) {
+      return []
+    }
+
+    seen.add(path)
+
+    const source = (entry as DownloadFolder)?.source
+
+    return [{ path, source: typeof source === "string" ? source : "custom" }]
+  })
+}
+
 function mergeKeybinds(stored: Record<string, string> | undefined) {
   const merged = defaultKeybinds()
 
@@ -291,6 +356,7 @@ function mergeSettingsConfig(
     downloads: {
       ...defaultSettingsConfig.downloads,
       ...parsed?.downloads,
+      folders: mergeDownloadFolders(parsed?.downloads?.folders),
       filenameTemplate: migrateFilenameTemplate(
         parsed?.downloads?.filenameTemplate
       ),

@@ -416,7 +416,9 @@ export type DirectoryCheck = {
  * way to ask Windows - so this touches the disk and should be debounced rather
  * than run on every keystroke.
  */
-export async function checkDirectory(path: string): Promise<DirectoryCheck | null> {
+export async function checkDirectory(
+  path: string
+): Promise<DirectoryCheck | null> {
   if (!inTauri()) {
     return null
   }
@@ -477,6 +479,156 @@ export function openUrl(url: string) {
 
 export function revealPath(path: string) {
   return shell("inferno_reveal_path", path)
+}
+
+/**
+ * Is the file the service resolved still on disk?
+ *
+ * `/health` cannot answer this: the service resolves its binaries once at
+ * startup and caches the result, so a file deleted afterwards still reports as
+ * present. Null outside Tauri, where there is no filesystem to ask about -
+ * which is not the same answer as `false`.
+ */
+export async function verifyBinary(path: string): Promise<boolean | null> {
+  if (!inTauri()) {
+    return null
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core")
+
+    return await invoke<boolean>("inferno_verify_binary", { path })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Where a vendored binary belongs, whether or not one is there now.
+ *
+ * `bundled` is the plain path inside the vendor tree - `js/qjs` - and the
+ * platform's extension is added on the other side. Needed for the case where
+ * nothing resolved at all: `/health` then reports no path, so a repair has to
+ * be told where the file goes rather than where it was.
+ */
+export async function vendorPath(bundled: string): Promise<string | null> {
+  if (!inTauri()) {
+    return null
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core")
+
+    return await invoke<string>("inferno_vendor_path", { bundled })
+  } catch {
+    return null
+  }
+}
+
+/** How far along a download is. `total` is 0 when nobody could say. */
+/**
+ * Fetch a replacement binary over HTTPS, reporting progress as it goes.
+ *
+ * Done in Rust because GitHub serves release assets with no
+ * `Access-Control-Allow-Origin`, so the webview's own `fetch` is refused
+ * before it starts.
+ */
+export async function downloadBinary(
+  path: string,
+  url: string,
+  sha256?: string,
+  /**
+   * When the download is an archive: which files to lift out of it. Matched on
+   * file name alone, because these archives wrap everything in a folder named
+   * after the version.
+   */
+  extract?: Array<{ name: string; destination: string }>,
+  /**
+   * Where the build's own digest is published, when it is not handed over
+   * directly. Fetched on the Rust side - these files sit on the build host's
+   * site, which sends no CORS headers.
+   */
+  checksumUrl?: string
+): Promise<string> {
+  if (!inTauri()) {
+    throw new InfernoError({
+      code: "not_supported",
+      message: "Downloading files is only available in the desktop app.",
+    })
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core")
+
+  try {
+    return await invoke<string>("inferno_download_binary", {
+      path,
+      url,
+      sha256: sha256 ?? null,
+      checksumUrl: checksumUrl ?? null,
+      extract: extract ?? null,
+    })
+  } catch (cause) {
+    throw new InfernoError({
+      code: "download_failed",
+      message:
+        typeof cause === "string"
+          ? cause
+          : ((cause as { message?: string })?.message ??
+            "The download failed."),
+    })
+  }
+}
+
+/** A folder the operating system already has a name for. */
+export type KnownFolder = {
+  /** Stable across machines and languages, unlike the path or the label. */
+  id: string
+  label: string
+  path: string
+  exists: boolean
+}
+
+/**
+ * The folders worth offering without anybody typing a path.
+ *
+ * Asked of the OS rather than assembled here: `~/Downloads` is wrong on a
+ * machine where the folder has been redirected, and wrong in every language
+ * that does not call it that. Empty outside Tauri, where there is nothing to
+ * ask.
+ */
+export async function knownFolders(): Promise<KnownFolder[]> {
+  if (!inTauri()) {
+    return []
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core")
+
+    return await invoke<KnownFolder[]>("inferno_known_folders")
+  } catch {
+    return []
+  }
+}
+
+/**
+ * SHA-256 of a file on disk, or null where there is no answer to be had.
+ *
+ * Null rather than a throw for both "not running in Tauri" and "could not be
+ * read": every caller so far wants a digest to *display*, and a missing one is
+ * a blank line rather than a failure worth interrupting anybody over.
+ */
+export async function hashFile(path: string): Promise<string | null> {
+  if (!inTauri()) {
+    return null
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core")
+
+    return await invoke<string>("inferno_hash_file", { path })
+  } catch {
+    return null
+  }
 }
 
 /** A bound client. Cheap to construct; hold one per endpoint. */

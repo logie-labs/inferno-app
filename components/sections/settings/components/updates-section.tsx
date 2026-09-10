@@ -6,6 +6,7 @@ import {
   RiArrowRightSLine,
   RiCheckLine,
   RiCloseCircleLine,
+  RiDownloadCloud2Line,
   RiErrorWarningLine,
   RiExternalLinkLine,
   RiFileCopyLine,
@@ -35,20 +36,22 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import {
+  RowContextMenu,
+  type RowAction as MenuAction,
+} from "@/components/sections/downloads/row-menu"
 import { describeError, openUrl, revealPath } from "@/lib/inferno-service"
 import {
-  bundledComponents,
   checkForUpdates,
+  componentsInGroup,
   DEFAULT_APP_REPO,
   describeAge,
   describeFeed,
-  failedComponents,
-  missingComponents,
-  outdatedComponents,
-  trackedComponents,
+  displayComponents,
   useUpdateCheck,
   versionReport,
   type ComponentReport,
+  type UpdatePreferences,
   type UpdateReport,
   type UpdateState,
 } from "@/lib/updates"
@@ -175,6 +178,14 @@ function messageTone(state: UpdateState) {
   }
 }
 
+/** Copy something small, and say so. Shared by the row and its menu. */
+function copyToClipboard(label: string, value: string) {
+  void navigator.clipboard
+    .writeText(value)
+    .then(() => toast.success(`${label} copied`))
+    .catch(() => toast.error("Could not copy to the clipboard."))
+}
+
 /** The tiny uppercase rule that heads each band of rows. */
 function GroupHeading({ title, note }: { title: string; note?: string }) {
   return (
@@ -193,21 +204,48 @@ function GroupHeading({ title, note }: { title: string; note?: string }) {
 }
 
 /**
- * The shell every row shares: a one-pixel border with a heavier left edge
- * carrying the row's status colour.
+ * The shell every row shares: an even border, with the left edge coloured by
+ * the row's status.
  *
- * The weight is what makes the colour legible - at one pixel a green edge and
- * a grey one are the same edge from a normal viewing distance. The summary
- * band above uses the same pair of widths for the same reason.
+ * Even on all four sides, so the boxes stack flush and colour alone carries
+ * the status. The summary band above is built the same way, so the two read as
+ * one set rather than as a heading and a list drawn by different hands.
  *
  * Shared so the app's row - which is a button, because opening it says what is
  * inside the install - sits on exactly the same line as the rows that are not.
  */
 const ROW_SHELL =
-  "flex flex-col gap-2 border bg-muted/20 p-3 @xl:flex-row @xl:items-center @xl:gap-4"
+  "flex flex-col gap-2 border border-l bg-muted/20 p-3 transition-colors @xl:flex-row @xl:items-center @xl:gap-4"
 
-/** Everything in a row except what it does when you press it. */
-function RowBody({ report }: { report: ComponentReport }) {
+/**
+ * What a row being checked looks like: the shell itself lit slightly.
+ *
+ * The loading state is the background rather than a bar or a shimmer, because
+ * several rows can be checking at once now and a list of animations racing each
+ * other reads as a fault. A tint says the same thing quietly, and being a
+ * colour it costs no layout - which is the whole point, since the row must not
+ * move while it waits.
+ */
+const ROW_BUSY = "bg-foreground/10"
+
+/**
+ * Everything in a row except what it does when you press it.
+ *
+ * `busy` is this row's own answer still being fetched, not the check as a
+ * whole: the app's release, the service's health and yt-dlp's release all
+ * land at different moments, so each row stops spinning when *it* is known
+ * rather than when the last of them is.
+ */
+function RowBody({
+  report,
+  busy,
+  restoring,
+}: {
+  report: ComponentReport
+  busy?: boolean
+  /** A repair is running for this row - looking for a spare, or fetching one. */
+  restoring?: boolean
+}) {
   const style = STATE_STYLE[report.state]
   const Icon = style.icon
   const note = versionNote(report)
@@ -218,22 +256,70 @@ function RowBody({ report }: { report: ComponentReport }) {
       <div className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">{report.name}</span>
-          <Badge className={style.tone}>
-            <Icon data-icon="inline-start" />
-            {style.label}
-          </Badge>
+          {/* A repair outranks everything else the badge could say. "Missing"
+              is still true while one runs, but it is the least useful true
+              thing available - it describes the problem to somebody who can
+              already see the app solving it. */}
+          {restoring ? (
+            // Amber, not red. Red is for something broken and left that way;
+            // a file being fetched is on its way to fine, which is the same
+            // "wants a moment, needs nothing from you" the outdated rows wear.
+            //
+            // No percentage, and nothing drawn behind the row. ffmpeg and
+            // ffprobe come out of one archive, so a repair for both is one
+            // transfer with one number - and the same number behind two rows
+            // drew a pair of bars moving in lockstep, which read as a bug
+            // rather than as a download. The word is the whole status.
+            <Badge className="text-warning">
+              <RiDownloadCloud2Line data-icon="inline-start" />
+              Downloading
+            </Badge>
+          ) : busy ? (
+            <Badge variant="ghost">
+              <Spinner data-icon="inline-start" className="size-3" />
+              Checking
+            </Badge>
+          ) : (
+            <Badge className={style.tone}>
+              <Icon data-icon="inline-start" />
+              {style.label}
+            </Badge>
+          )}
         </div>
         <p className="mt-0.5 text-xs text-muted-foreground">{report.purpose}</p>
 
         {/* The reason, but only where there is one worth reading. A settled
             row explains nothing beyond its badge; a row that is behind, gone
-            or unanswered is the whole reason somebody opened this screen. */}
+            or unanswered is the whole reason somebody opened this screen.
+            Kept on screen while the row is re-checked rather than hidden:
+            taking it away shrinks the row, and putting it back a second later
+            grows it again, which shuffles everything underneath twice for no
+            information at all. */}
         {tone && report.message ? (
-          <p className={cn("mt-1 text-xs", tone)}>{report.message}</p>
+          <p
+            className={cn(
+              "mt-1 text-xs transition-opacity",
+              tone,
+              busy && "opacity-40"
+            )}
+          >
+            {report.message}
+          </p>
         ) : null}
       </div>
 
-      <div className="shrink-0 @xl:w-36 @xl:text-right">
+      <div
+        className={cn(
+          "min-w-0 shrink-0 transition-opacity @xl:w-52 @xl:text-right",
+          // The previous answer stays put while it is re-checked - dimmed, so
+          // it reads as "this is what it was" rather than as fresh.
+          busy && "opacity-40"
+        )}
+      >
+        {/* One line, always. A version that wrapped moved every row below it
+            about, which costs more than the tail of an ffmpeg build string is
+            worth - and the full value is on the tooltip and one menu item
+            away. */}
         <div
           className={cn(
             "truncate font-mono text-xs",
@@ -243,10 +329,34 @@ function RowBody({ report }: { report: ComponentReport }) {
         >
           {report.current ?? "no version"}
         </div>
-        {note ? (
+
+        {/* Underneath: the digest of the file itself where there is one, and
+            otherwise what the version is being measured against. The hash wins
+            because it is the more specific answer - two builds can share a
+            version string and not a byte. */}
+        {report.hash ? (
+          <span
+            // A span, not a button: the app's row *is* a button, and although
+            // it never carries a hash today, nesting one inside it would be
+            // invalid the moment it did. The same copy is on the row's menu,
+            // which is the keyboard-reachable half of this.
+            role="button"
+            tabIndex={-1}
+            title={`sha256:${report.hash}\nClick to copy`}
+            onClick={(event) => {
+              // The app's row opens a dialog on click; copying a digest is not
+              // a request to do that as well.
+              event.stopPropagation()
+              copyToClipboard("Digest", report.hash ?? "")
+            }}
+            className="block cursor-pointer truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {report.hash.slice(0, 16)}
+          </span>
+        ) : note ? (
           <div
             className={cn(
-              "truncate text-[10px] tracking-widest text-muted-foreground uppercase",
+              "text-[10px] tracking-widest text-muted-foreground uppercase",
               report.state === "outdated" && style.tone
             )}
           >
@@ -258,48 +368,154 @@ function RowBody({ report }: { report: ComponentReport }) {
   )
 }
 
+/**
+ * What right-clicking a row offers.
+ *
+ * Re-checking one component is the point of it: the whole-screen button asks
+ * everything, which on a slow feed means waiting on GitHub to find out whether
+ * ffmpeg is still where it was. Narrowed to one row it is a single question,
+ * and for a binary it is the one piece of real work in the check - the file
+ * gets read end to end again.
+ */
+function buildRowActions(
+  report: ComponentReport,
+  preferences: UpdatePreferences
+) {
+  const groups: MenuAction[][] = [
+    [
+      {
+        label: "Check for updates",
+        hint: `Re-check ${report.name} on its own`,
+        icon: RiRefreshLine,
+        run: () => {
+          void checkForUpdates(preferences, { only: [report.id] }).catch(
+            () => {}
+          )
+        },
+      },
+      // No "restore" entry. A missing file repairs itself the moment a check
+      // finds it, and every check tries again - so an item to ask for it by
+      // hand would only ever duplicate what has already happened.
+    ],
+    [
+      {
+        label: "Copy version",
+        hint: report.current ?? "This one did not report a version",
+        icon: RiFileCopyLine,
+        disabled: !report.current,
+        run: () => copyToClipboard("Version", report.current ?? ""),
+      },
+      ...(report.hash
+        ? [
+            {
+              label: "Copy SHA-256",
+              hint: report.hash,
+              icon: RiFileCopyLine,
+              run: () => copyToClipboard("Digest", report.hash ?? ""),
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(report.url
+        ? [
+            {
+              label: "Open releases",
+              icon: RiExternalLinkLine,
+              run: () => {
+                void openUrl(report.url ?? "").catch((error: unknown) => {
+                  toast.error(describeError(error))
+                })
+              },
+            },
+          ]
+        : []),
+      ...(report.path
+        ? [
+            {
+              label: "Show in folder",
+              hint: report.path,
+              icon: RiFolderOpenLine,
+              run: () => {
+                void revealPath(report.path ?? "").catch((error: unknown) => {
+                  toast.error(describeError(error))
+                })
+              },
+            },
+          ]
+        : []),
+    ],
+  ]
+
+  return groups
+}
+
 /** One component: what it is, what version it is, and what to do about it. */
-function ComponentRow({ report }: { report: ComponentReport }) {
+function ComponentRow({
+  report,
+  busy,
+  restoring,
+  preferences,
+}: {
+  report: ComponentReport
+  busy?: boolean
+  restoring?: boolean
+  preferences: UpdatePreferences
+}) {
   // Bound here so each handler closes over a string rather than a property
   // TypeScript cannot promise is still there when it runs.
   const releases = report.url
   const location = report.path
+  const groups = buildRowActions(report, preferences)
 
   return (
-    <div className={cn(ROW_SHELL, STATE_STYLE[report.state].edge)}>
-      <RowBody report={report} />
+    <RowContextMenu groups={groups}>
+      <div
+        className={cn(
+          ROW_SHELL,
+          // A row being re-checked has no status yet, so it wears none; one
+          // being put back wears the amber its badge does.
+          restoring
+            ? "border-l-warning"
+            : busy
+              ? cn("border-l-border", ROW_BUSY)
+              : STATE_STYLE[report.state].edge
+        )}
+      >
+        <RowBody report={report} busy={busy} restoring={restoring} />
 
-      {/* One action, as an icon. The left column is narrow once the panel
+        {/* One action, as an icon. The left column is narrow once the panel
           splits in two, and a labelled button here cost more width than the
           version it sat beside - which is the thing somebody came to read. */}
-      <div className="flex shrink-0 items-center justify-end">
-        {releases ? (
-          <RowAction
-            label={`Open ${report.name} releases`}
-            icon={RiExternalLinkLine}
-            onClick={() => {
-              void openUrl(releases).catch((error: unknown) => {
-                toast.error(describeError(error))
-              })
-            }}
-          />
-        ) : location ? (
-          <RowAction
-            label={`Show ${report.name} in the file manager`}
-            icon={RiFolderOpenLine}
-            onClick={() => {
-              void revealPath(location).catch((error: unknown) => {
-                toast.error(describeError(error))
-              })
-            }}
-          />
-        ) : (
-          // A placeholder, so the version column lines up down the list
-          // whether or not a row has anything to press.
-          <span aria-hidden className="size-7" />
-        )}
+        <div className="flex shrink-0 items-center justify-end">
+          {releases ? (
+            <RowAction
+              label={`Open ${report.name} releases`}
+              icon={RiExternalLinkLine}
+              onClick={() => {
+                void openUrl(releases).catch((error: unknown) => {
+                  toast.error(describeError(error))
+                })
+              }}
+            />
+          ) : location ? (
+            <RowAction
+              label={`Show ${report.name} in the file manager`}
+              icon={RiFolderOpenLine}
+              onClick={() => {
+                void revealPath(location).catch((error: unknown) => {
+                  toast.error(describeError(error))
+                })
+              }}
+            />
+          ) : (
+            // A placeholder, so the version column lines up down the list
+            // whether or not a row has anything to press.
+            <span aria-hidden className="size-7" />
+          )}
+        </div>
       </div>
-    </div>
+    </RowContextMenu>
   )
 }
 
@@ -317,42 +533,60 @@ function ComponentRow({ report }: { report: ComponentReport }) {
 function AppRow({
   report,
   inside,
+  busy,
+  restoring,
+  preferences,
 }: {
   report: ComponentReport
   inside: ComponentReport[]
+  busy?: boolean
+  restoring?: boolean
+  preferences: UpdatePreferences
 }) {
   const releases = report.url
+  const groups = buildRowActions(report, preferences)
 
   return (
     <Dialog>
-      <DialogTrigger
-        render={
-          <button
-            type="button"
-            className={cn(
-              ROW_SHELL,
-              STATE_STYLE[report.state].edge,
-              "w-full cursor-pointer text-left transition-colors outline-none",
-              "hover:bg-muted/40 focus-visible:bg-muted/40"
-            )}
-          />
-        }
-      >
-        <RowBody report={report} />
-        <div className="flex shrink-0 items-center justify-end">
-          <RiArrowRightSLine
-            aria-hidden
-            className="size-4 text-muted-foreground"
-          />
-        </div>
-      </DialogTrigger>
+      {/* The row answers to both a left and a right click: opening it says
+          what is inside the install, and the menu re-checks just this one.
+          Composed rather than nested, so there is still exactly one element
+          in the list where a person sees one row. */}
+      <RowContextMenu groups={groups}>
+        <DialogTrigger
+          render={
+            <button
+              type="button"
+              className={cn(
+                ROW_SHELL,
+                restoring
+                  ? "border-l-warning"
+                  : busy
+                    ? cn("border-l-border", ROW_BUSY)
+                    : STATE_STYLE[report.state].edge,
+                "w-full cursor-pointer text-left outline-none",
+                "hover:bg-muted/40 focus-visible:bg-muted/40"
+              )}
+            />
+          }
+        >
+          <RowBody report={report} busy={busy} restoring={restoring} />
+          <div className="flex shrink-0 items-center justify-end">
+            <RiArrowRightSLine
+              aria-hidden
+              className="size-4 text-muted-foreground"
+            />
+          </div>
+        </DialogTrigger>
+      </RowContextMenu>
 
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Inside {report.name}</DialogTitle>
           <DialogDescription>
-            The app and everything sealed into this install. None of it updates
-            on its own - all of it moves when the app does.
+            The app and its own working parts - the download service, the yt-dlp
+            inside it, the Python it is built on. None of them update on their
+            own; all of them move when the app does.
           </DialogDescription>
         </DialogHeader>
 
@@ -474,18 +708,36 @@ function Stat({ value, label }: { value: number; label: string }) {
   )
 }
 
-/** The whole install in one sentence, plus the counts behind it. */
-function Summary({ report }: { report: UpdateReport | null }) {
-  const behind = outdatedComponents(report)
-  const missing = missingComponents(report)
-  const failed = failedComponents(report)
-  const bundled = bundledComponents(report)
-  const tracked = report?.components.filter((entry) => entry.latest) ?? []
+/**
+ * The whole install in one sentence, plus the counts behind it.
+ *
+ * Counted over the rows on screen rather than over the whole check. The band
+ * has to be a summary of the list beneath it - naming something in the
+ * headline that has no row to look at would send somebody hunting for a thing
+ * this screen deliberately does not list.
+ */
+function Summary({
+  report,
+  checking,
+}: {
+  report: UpdateReport | null
+  checking: boolean
+}) {
+  // Padded to the full roster whether or not anything has been checked, so
+  // the counts below occupy the same space before and after a check.
+  const shown = displayComponents(report)
+  const behind = shown.filter((entry) => entry.state === "outdated")
+  const missing = shown.filter((entry) => entry.state === "unavailable")
+  const failed = shown.filter((entry) => entry.state === "error")
+  const bundled = shown.filter((entry) => entry.state === "bundled")
+  const tracked = shown.filter((entry) => entry.latest)
 
   // Ordered by what somebody would want to be told first: a missing ffmpeg
   // breaks downloads today, where an available update does not.
   const headline = !report
-    ? "Nothing has been checked yet."
+    ? checking
+      ? "Checking this install."
+      : "Nothing has been checked yet."
     : missing.length > 0
       ? `${missing.map((entry) => entry.name).join(", ")} ${missing.length === 1 ? "is" : "are"} missing.`
       : behind.length > 0
@@ -516,7 +768,7 @@ function Summary({ report }: { report: UpdateReport | null }) {
   return (
     <div
       className={cn(
-        "flex flex-col gap-4 border bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between",
+        "flex flex-col gap-4 border border-l bg-muted/20 p-4 @2xl:flex-row @2xl:items-center @2xl:justify-between",
         status.edge
       )}
     >
@@ -533,9 +785,11 @@ function Summary({ report }: { report: UpdateReport | null }) {
         </div>
       </div>
 
-      {report ? (
+      {/* Present from the moment a check starts, so the band does not grow a
+          column of numbers halfway through one. */}
+      {report || checking ? (
         <div className="flex shrink-0 gap-6 border-t pt-3 @2xl:border-t-0 @2xl:border-l @2xl:pt-0 @2xl:pl-6">
-          <Stat value={report.components.length} label="Components" />
+          <Stat value={shown.length} label="Components" />
           <Stat value={tracked.length} label="Tracked" />
           <Stat value={bundled.length} label="With the app" />
         </div>
@@ -612,7 +866,7 @@ export function UpdatesSection({
   updateConfig,
 }: SettingsSectionComponentProps) {
   const preferences = config.updates
-  const { report, checking } = useUpdateCheck()
+  const { report, checking, pending, repairing } = useUpdateCheck()
 
   // "4 minutes ago" stops being true while somebody reads it, so the line is
   // re-rendered on a slow tick rather than only when the report changes.
@@ -623,16 +877,25 @@ export function UpdatesSection({
     return () => clearInterval(timer)
   }, [])
 
-  const tracked = trackedComponents(report)
-  const bundled = bundledComponents(report)
-  const app = tracked.filter((entry) => entry.id === "app")
-  const external = tracked.filter((entry) => entry.id !== "app")
+  const isPending = (entry: ComponentReport) => pending.includes(entry.id)
+
+  // Split by where a thing came from, not by what the check made of it. The
+  // list out here is somebody else's software shipped beside the app; the
+  // app's own parts - its service, the yt-dlp in it, the Python it is frozen
+  // with - are what opening the app's row shows. Provenance does not change
+  // with an answer, so nothing moves between the two mid-check.
+  const app = componentsInGroup(report, "app")
+  const external = componentsInGroup(report, "vendor")
+  const inside = componentsInGroup(report, "inside")
 
   const runCheck = () => {
     void checkForUpdates(preferences)
       .then((result) => {
-        const behind = outdatedComponents(result)
-        const failed = failedComponents(result)
+        // The same set the screen lists, so a toast never names a row that is
+        // not there to be looked at.
+        const settled = displayComponents(result)
+        const behind = settled.filter((entry) => entry.state === "outdated")
+        const failed = settled.filter((entry) => entry.state === "error")
 
         if (behind.length > 0) {
           toast.info(
@@ -710,11 +973,14 @@ export function UpdatesSection({
           with the app rail and the settings nav, so the viewport says almost
           nothing about how much room there is here. */}
       <div className="@container flex flex-col gap-4">
-        <Summary report={report} />
+        <Summary report={report} checking={checking} />
 
         <div className="grid gap-4 @3xl:grid-cols-[minmax(0,1fr)_19rem] @3xl:items-start">
           <div className="flex min-w-0 flex-col gap-2">
-            {report ? (
+            {/* Drawn as soon as a check starts, not only once it finishes -
+                the roster is known in advance, so the first check on a fresh
+                install has real rows to put its spinners on. */}
+            {report || checking ? (
               <>
                 <GroupHeading
                   title="The app"
@@ -725,26 +991,39 @@ export function UpdatesSection({
                   }
                 />
                 {app.map((entry) => (
-                  <AppRow key={entry.id} report={entry} inside={bundled} />
+                  <AppRow
+                    key={entry.id}
+                    report={entry}
+                    inside={inside}
+                    busy={isPending(entry)}
+                    restoring={repairing.includes(entry.id)}
+                    preferences={preferences}
+                  />
                 ))}
 
                 {external.length > 0 ? (
                   <>
                     <GroupHeading
-                      title="Tracked separately"
-                      note="Checked on its own"
+                      title="Alongside the app"
+                      note="Third-party, shipped with it"
                     />
                     {external.map((entry) => (
-                      <ComponentRow key={entry.id} report={entry} />
+                      <ComponentRow
+                        key={entry.id}
+                        report={entry}
+                        busy={isPending(entry)}
+                        restoring={repairing.includes(entry.id)}
+                        preferences={preferences}
+                      />
                     ))}
                   </>
                 ) : null}
               </>
             ) : (
               <div className="border bg-muted/20 p-3 text-xs text-muted-foreground">
-                The app, the download service, yt-dlp, ffmpeg, ffprobe, the JS
-                runtime and Python are all checked together. Open the app&apos;s
-                row afterwards to see everything sealed inside it.
+                The app, the download service and the media tools it ships are
+                all checked together. Open the app&apos;s row afterwards to see
+                everything sealed inside it.
               </div>
             )}
           </div>

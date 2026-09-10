@@ -22,8 +22,7 @@ import { loadSettingsConfig } from "@/components/sections/settings/settings-conf
 import { requestSettingsSection } from "@/components/sections/settings/settings-navigation"
 import {
   checkForUpdates,
-  failedComponents,
-  outdatedComponents,
+  displayComponents,
   updateCheckRequestEvent,
   type UpdateReport,
 } from "@/lib/updates"
@@ -43,8 +42,12 @@ export function UpdateWatcher() {
 
   const announce = useCallback(
     (report: UpdateReport, requested: boolean) => {
-      const behind = outdatedComponents(report)
-      const failed = failedComponents(report)
+      // Only what the Updates screen actually lists. A notification about
+      // something with no row to open would send somebody looking for a thing
+      // that screen deliberately leaves out.
+      const settled = displayComponents(report)
+      const behind = settled.filter((entry) => entry.state === "outdated")
+      const failed = settled.filter((entry) => entry.state === "error")
 
       if (behind.length === 0) {
         // Nothing to report. A check somebody actually asked for still gets an

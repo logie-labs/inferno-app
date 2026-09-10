@@ -6,6 +6,7 @@ import { ContextMenuGuard } from "@/components/context-menu-guard"
 import { SpotifyConflictDialog } from "@/components/spotify-conflict-dialog"
 import { ActiveSectionProvider } from "@/components/sections/active-section-context"
 import { InfernoServiceProvider } from "@/components/sections/downloads/service-context"
+import { TaskbarProgress } from "@/components/taskbar-progress"
 import { ThemeProvider } from "@/components/theme-provider"
 import { UpdateWatcher } from "@/components/update-watcher"
 import { Toaster } from "@/components/ui/sonner"
@@ -54,6 +55,9 @@ export default function RootLayout({
                     to take you to the screen that explains it, and it has to
                     be able to do that from wherever you were. */}
                 <UpdateWatcher />
+                {/* Inside the service provider, which owns the queue: the
+                    taskbar has to keep moving while another screen is up. */}
+                <TaskbarProgress />
                 <ContextMenuGuard />
                 {/* At the root: a download finishing asks this question
                     from the service provider, which is not on any one

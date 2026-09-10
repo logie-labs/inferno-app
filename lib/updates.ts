@@ -28,8 +28,12 @@ import { useSyncExternalStore } from "react"
 import { getAppVersion } from "@/lib/app-version"
 import {
   getServiceEndpoint,
+  downloadBinary,
   getServiceStatus,
+  hashFile,
   InfernoClient,
+  vendorPath,
+  verifyBinary,
   type Health,
   type ResolvedBinary,
   type ServiceStatus,
@@ -66,6 +70,22 @@ export type UpdateState =
   | "unknown"
   | "error"
 
+/**
+ * Which of the screen's three lists a component belongs in.
+ *
+ * Provenance, not status - it never changes with the answer a check gives.
+ *
+ * - `app` is the app itself, the row everything else hangs off.
+ * - `vendor` is a third-party program shipped beside the app in `vendor/`:
+ *   ffmpeg, ffprobe, the JS runtime. Somebody else's release, somebody else's
+ *   version number, and a file you can point at - so they are listed.
+ * - `inside` is the app's own working parts: the service executable, the
+ *   yt-dlp inside it, the Python it is frozen with. Real answers to "what am I
+ *   running" and worth reading, but not separate things to keep an eye on, so
+ *   they live behind the app's row rather than beside it.
+ */
+export type ComponentGroup = "app" | "vendor" | "inside"
+
 export type ComponentReport = {
   id: UpdateComponentId
   name: string
@@ -82,6 +102,17 @@ export type ComponentReport = {
   url: string | null
   /** Where it actually is on disk, for the binaries that have a place. */
   path: string | null
+  /**
+   * SHA-256 of that file, for the components that are one.
+   *
+   * The only part of the check that reads the install rather than asking
+   * something about it, and the only answer that would notice a binary being
+   * swapped underneath a version string that stayed the same. Null when there
+   * is no file, or when it could not be read.
+   */
+  hash: string | null
+  /** Which of the three lists this belongs to. See `ComponentGroup`. */
+  group: ComponentGroup
 }
 
 export type UpdateReport = {
@@ -188,12 +219,21 @@ export function compareVersions(
 
 // --- release feeds ---------------------------------------------------------
 
+/** One downloadable file attached to a release. */
+export type ReleaseAsset = {
+  name: string
+  url: string
+  /** Bytes, as the release reports them - the divisor for a progress bar. */
+  size: number
+}
+
 export type Release = {
   version: string
   url: string | null
   /** ISO 8601, as published. */
   publishedAt: string | null
   prerelease: boolean
+  assets: ReleaseAsset[]
 }
 
 const GITHUB_API = "https://api.github.com"
@@ -291,6 +331,11 @@ type GithubRelease = {
   published_at?: string
   prerelease?: boolean
   draft?: boolean
+  assets?: Array<{
+    name?: string
+    browser_download_url?: string
+    size?: number
+  }>
 }
 
 /**
@@ -338,6 +383,17 @@ async function githubRelease(repo: string): Promise<Release | null> {
     url: release?.html_url ?? null,
     publishedAt: release?.published_at ?? null,
     prerelease: Boolean(release?.prerelease),
+    assets: (release?.assets ?? []).flatMap((asset) =>
+      asset?.name && asset?.browser_download_url
+        ? [
+            {
+              name: asset.name,
+              url: asset.browser_download_url,
+              size: asset.size ?? 0,
+            },
+          ]
+        : []
+    ),
   }
 }
 
@@ -417,6 +473,8 @@ async function appRelease(feed: string): Promise<Release | null> {
     url: payload?.html_url ?? payload?.url ?? null,
     publishedAt: payload?.published_at ?? payload?.pub_date ?? null,
     prerelease: Boolean(payload?.prerelease),
+    // A hand-written manifest names a version, not a set of files to fetch.
+    assets: [],
   }
 }
 
@@ -489,9 +547,21 @@ function binaryReport(
   name: string,
   purpose: string,
   binary: ResolvedBinary | undefined,
-  serviceUp: boolean
+  serviceUp: boolean,
+  /** What its absence costs, when that is worth saying more precisely. */
+  whenMissing = "Not found. Downloads that need it will fail until it is installed."
 ): ComponentReport {
-  const base = { id, name, purpose, latest: null, url: null }
+  const base = {
+    id,
+    name,
+    purpose,
+    latest: null,
+    url: null,
+    // Filled in by the caller, which is the only place that can afford to
+    // wait for a file to be read end to end.
+    hash: null,
+    group: "vendor" as const,
+  }
 
   if (!serviceUp) {
     return {
@@ -509,9 +579,7 @@ function binaryReport(
       current: null,
       path: null,
       state: "unavailable",
-      message:
-        binary?.error ||
-        "Not found. Downloads that need it will fail until it is installed.",
+      message: binary?.error || whenMissing,
     }
   }
 
@@ -561,6 +629,8 @@ async function appReport(
     latest: null,
     url: null,
     path: null,
+    hash: null,
+    group: "app" as const,
   }
 
   const feed = describeFeed(preferences.feedUrl)
@@ -641,6 +711,9 @@ async function ytDlpReport(health: Health | null): Promise<ComponentReport> {
     latest: null,
     url: YT_DLP_RELEASES,
     path: null,
+    hash: null,
+    // A pip package inside the service's exe, not a file of its own.
+    group: "inside" as const,
   }
 
   if (!health) {
@@ -710,95 +783,511 @@ async function ytDlpReport(health: Health | null): Promise<ComponentReport> {
 }
 
 /**
+ * Where a bundled copy of each binary sits inside the vendor tree.
+ *
+ * Plain names, no extension - the Rust side adds `.exe` where that is what a
+ * file is called. Only the three that are actually vendored appear here; the
+ * service's own executable is not something the app ships a spare of.
+ */
+const VENDOR_RELATIVE: Partial<Record<UpdateComponentId, string>> = {
+  ffmpeg: "ffmpeg/ffmpeg",
+  ffprobe: "ffmpeg/ffprobe",
+  "js-runtime": "js/qjs",
+}
+
+/**
+ * The row, after checking the file it names is really there.
+ *
+ * `/health` is not enough on its own: the service resolves its binaries once
+ * at startup and caches the answer, so a file deleted since then still reports
+ * as present and the row would sit there saying "Up to date" about something
+ * that is gone.
+ *
+ * When it is gone the row is turned back to missing, which is what starts a
+ * repair. Finding the file again does not fix anything by itself: the running
+ * service is still pointing at the path it resolved at startup, so a
+ * replacement only takes effect on the next launch.
+ */
+async function verifiedOnDisk(
+  component: ComponentReport
+): Promise<ComponentReport> {
+  const relative = VENDOR_RELATIVE[component.id]
+
+  // Nothing resolved at all, so there is no path to check - `/health` said it
+  // could not find the binary anywhere. It may be there now anyway: a repair
+  // just put one back, or somebody dropped one in by hand, and the service
+  // will not notice either until it restarts. So the destination is checked
+  // directly rather than the service's word being taken for it.
+  if (!component.path) {
+    if (component.state !== "unavailable" || !relative) {
+      return component
+    }
+
+    const destination = await vendorPath(relative)
+    const present = destination ? await verifyBinary(destination) : null
+
+    if (!present) {
+      return component
+    }
+
+    return {
+      ...component,
+      path: destination,
+      message:
+        "The file is in place now, but the service resolved its tools when it started. Restart the app to use it.",
+    }
+  }
+
+  const present = await verifyBinary(component.path)
+
+  // Null is "could not ask" - a browser, or the command failing - and is not
+  // evidence the file has gone. Only an outright `false` is.
+  if (present !== false) {
+    return component
+  }
+
+  return {
+    ...component,
+    state: "unavailable",
+    // The path stays pointed at where the file is *supposed* to be, because
+    // that is where the download has to land.
+    hash: null,
+    // Nothing said about it. A repair starts on its own the moment this is
+    // reported, so a sentence announcing one would be narrating something
+    // already in hand - and it would be stale a second later. The badge says
+    // the file is missing and the fill behind the row says how the replacing
+    // is going; between them there is nothing left to write down.
+    message: null,
+  }
+}
+
+/**
+ * Where a missing binary is fetched from.
+ *
+ * The web, always - there is deliberately no copy-it-from-somewhere-else
+ * path. A repair that quietly restored a spare would only ever run on a
+ * developer's machine, where the checkout has one lying about; every real
+ * install has a single vendor directory and nothing to fall back on. So the
+ * only route is the one users get, which means it is the one that gets
+ * tested.
+ *
+ * Every source here has to be worth trusting an executable from: a publisher
+ * with real releases, and a published digest wherever one exists.
+ */
+type DownloadSource = {
+  repo: string
+  /** Picks the one file worth fetching out of a release's assets. */
+  asset: (name: string) => boolean
+  /**
+   * Present when the asset is an archive rather than the binary itself.
+   *
+   * Lists every component the one download satisfies - ffmpeg's zip carries
+   * ffprobe as well - so the pair is fetched once and unpacked into both
+   * slots rather than downloading a hundred megabytes twice.
+   */
+  extract?: UpdateComponentId[]
+  /**
+   * Where the build's own SHA-256 is published, given the asset's name.
+   *
+   * Worth the extra request: without it a download is trusted purely because
+   * TLS said the host was who it claimed. With it, the bytes have to match a
+   * digest the publisher wrote down - and for ffmpeg the digest and the file
+   * come from two different hosts, so tampering would have to reach both.
+   */
+  checksum?: (asset: string) => string
+}
+
+const FFMPEG_SOURCE: DownloadSource = {
+  // gyan.dev's builds, which is where this project's ffmpeg has always come
+  // from - and they are published as GitHub releases with real version tags
+  // (`9.0.1`), not a rolling `latest`. That is worth something beyond the
+  // download: a tagged build reports a version this app can actually compare,
+  // where the git-master builds call themselves `N-126308-gd411d9e752` and
+  // cannot be ranked against anything.
+  repo: "GyanD/codexffmpeg",
+  // `essentials` is the static build - one self-contained exe per tool. The
+  // `shared` variants are smaller only because they leave their DLLs beside
+  // them, which is more files to place and more ways to half-install.
+  asset: (name) => /^ffmpeg-[\d.]+-essentials_build\.zip$/i.test(name),
+  extract: ["ffmpeg", "ffprobe"],
+  // gyan publishes a digest beside every package. The archive itself is
+  // fetched from the GitHub mirror of the same build - identical to the byte -
+  // so the two have to agree for the download to be accepted.
+  checksum: (asset) =>
+    `https://www.gyan.dev/ffmpeg/builds/packages/${asset}.sha256`,
+}
+
+const DOWNLOAD_SOURCES: Partial<Record<UpdateComponentId, DownloadSource>> = {
+  // Written out rather than reusing `QUICKJS_NG_REPO`, which is declared
+  // further down: a `const` read before its own line is a crash at import,
+  // not a hoisted undefined.
+  "js-runtime": {
+    repo: "quickjs-ng/quickjs",
+    asset: (name) => name === qjsAssetName(),
+  },
+  // Both point at the same archive, so repairing either one repairs the pair.
+  ffmpeg: FFMPEG_SOURCE,
+  ffprobe: FFMPEG_SOURCE,
+}
+
+/**
+ * Which quickjs-ng build this machine wants.
+ *
+ * Read off the user agent, which is the only thing a webview will say about
+ * the host. It is enough to tell the three desktop platforms apart and to spot
+ * 64-bit Windows; it cannot tell an Intel Mac from an Apple Silicon one, so
+ * that falls to arm64 - every Mac sold for years. A wrong guess fails at the
+ * download rather than producing a binary that will not run: the asset simply
+ * is not in the release.
+ */
+function qjsAssetName() {
+  const agent = typeof navigator === "undefined" ? "" : navigator.userAgent
+
+  if (/windows/i.test(agent)) {
+    return /wow64|win64|x64|x86_64/i.test(agent)
+      ? "qjs-windows-x86_64.exe"
+      : "qjs-windows-x86.exe"
+  }
+
+  if (/mac os|macintosh/i.test(agent)) {
+    return /intel/i.test(agent) ? "qjs-darwin-x86_64" : "qjs-darwin-arm64"
+  }
+
+  return /aarch64|arm64/i.test(agent) ? "qjs-linux-aarch64" : "qjs-linux-x86_64"
+}
+
+/**
+ * quickjs-ng publishes releases; Bellard's original QuickJS does not.
+ *
+ * The service already tells the two apart - it has to, because they version
+ * themselves differently - and reports which one resolved as `js_runtime.name`.
+ * Only the fork gets asked about, because only the fork has anywhere to ask.
+ */
+const QUICKJS_NG_REPO = "quickjs-ng/quickjs"
+
+/**
+ * A binary that does have an upstream, measured against it.
+ *
+ * ffmpeg and ffprobe get none of this, even though the build they are
+ * fetched from does publish releases. They resolve through `env -> bundled ->
+ * PATH`, so the copy in use may well be one the machine manages rather than
+ * one this app placed, and pressing a rebuild on that is not the app's call.
+ * They are fetched when there is nothing there at all, and otherwise left.
+ */
+async function checkedAgainstRelease(
+  component: ComponentReport,
+  repo: string
+): Promise<ComponentReport> {
+  // Nothing installed, or nothing readable: there is no comparison to make,
+  // and the row already says why.
+  if (
+    !component.current ||
+    (component.state !== "bundled" && component.state !== "pinned")
+  ) {
+    return component
+  }
+
+  let release: Release | null
+  try {
+    release = await githubRelease(repo)
+  } catch (error) {
+    return {
+      ...component,
+      state: "error",
+      message: error instanceof Error ? error.message : "The check failed.",
+    }
+  }
+
+  if (!release) {
+    return component
+  }
+
+  const withRelease = {
+    ...component,
+    latest: release.version,
+    url: release.url ?? `https://github.com/${repo}/releases`,
+  }
+  const order = compareVersions(component.current, release.version)
+
+  if (order === null) {
+    return {
+      ...withRelease,
+      state: "unknown",
+      message: "The installed version could not be read as a version.",
+    }
+  }
+
+  if (order < 0) {
+    return {
+      ...withRelease,
+      state: "outdated",
+      // Whose problem it is depends on whose copy it is - and the state going
+      // in is the only thing that still knows, since it is about to be
+      // overwritten with `outdated`.
+      message:
+        component.state === "bundled"
+          ? "A newer release is available. It ships with the app, so it arrives with the next app update."
+          : "A newer release is available. This copy came from outside the app, so updating it is yours to do.",
+    }
+  }
+
+  return {
+    ...withRelease,
+    state: "current",
+    message:
+      order > 0
+        ? "Newer than the latest published release."
+        : "Running the latest release.",
+  }
+}
+
+/**
+ * The order components are reported in, and everything the screen can know
+ * about them before a check has said anything.
+ *
+ * Exported so a check in progress can be drawn: the screen puts up this list
+ * with a spinner against every entry, and swaps each one for its answer as it
+ * lands. Without it the first check on a fresh install would have nothing to
+ * put a spinner on.
+ */
+export const COMPONENT_ROSTER: ReadonlyArray<{
+  id: UpdateComponentId
+  name: string
+  purpose: string
+  group: ComponentGroup
+}> = [
+  {
+    id: "app",
+    name: "inferno-app",
+    purpose: "The desktop app itself, and everything sealed inside it.",
+    group: "app",
+  },
+  {
+    id: "service",
+    name: "inferno-service",
+    purpose: "The download backend the app talks to.",
+    group: "inside",
+  },
+  {
+    id: "yt-dlp",
+    name: "yt-dlp",
+    purpose: "Does the actual extracting and downloading.",
+    group: "inside",
+  },
+  {
+    id: "python",
+    name: "Python",
+    purpose: "The runtime the service is built on.",
+    group: "inside",
+  },
+  {
+    id: "ffmpeg",
+    name: "ffmpeg",
+    purpose: "Merges video and audio streams, and converts formats.",
+    group: "vendor",
+  },
+  {
+    id: "ffprobe",
+    name: "ffprobe",
+    purpose: "Reads media details. yt-dlp finds it beside ffmpeg.",
+    group: "vendor",
+  },
+  {
+    id: "js-runtime",
+    name: "JS runtime",
+    purpose: "Runs the player scripts some sites need to hand over a URL.",
+    group: "vendor",
+  },
+]
+
+const ROSTER_ORDER = COMPONENT_ROSTER.map((entry) => entry.id)
+
+/** Told each time part of a check settles, so a screen can follow along. */
+export type UpdateProgress = (components: ComponentReport[]) => void
+
+/**
  * Every component, checked.
  *
  * Never rejects. A component that could not be checked says so in its own row
  * rather than taking the report down with it - a rate-limited GitHub must not
  * cost you the ffmpeg answer, which needed no network at all.
+ *
+ * Answers are handed back through `onProgress` as they arrive rather than only
+ * at the end, in waves that reflect what each one is waiting on: the app's
+ * release, then what `/health` knows, then each binary as its file finishes
+ * hashing, then yt-dlp's release. The app's fetch does not wait for the
+ * service, so on a cold launch - where the sidecar can take twenty seconds -
+ * the row that matters most is usually answered first.
+ *
+ * `only` narrows the check to one component, for re-checking a single row.
+ * The rest are carried over from `base` untouched, so a partial check still
+ * returns a whole report.
  */
 export async function runUpdateCheck(
   preferences: UpdatePreferences,
-  options: { waitForService?: number } = {}
+  options: {
+    waitForService?: number
+    onProgress?: UpdateProgress
+    only?: readonly UpdateComponentId[]
+    base?: UpdateReport | null
+  } = {}
 ): Promise<UpdateReport> {
-  const [installed, health, status] = await Promise.all([
-    getAppVersion(),
-    readHealth(options.waitForService ?? 0),
-    getServiceStatus(),
-  ])
+  const only = options.only
+  const wanted = (id: UpdateComponentId) => !only || only.includes(id)
 
-  // The two network calls run together; everything else is already in hand.
-  const [app, ytDlp] = await Promise.all([
-    appReport(preferences, installed),
-    ytDlpReport(health),
-  ])
+  // Seeded with what is already known, so a narrowed check does not return a
+  // report with holes where the components it skipped used to be.
+  const settled = new Map<UpdateComponentId, ComponentReport>(
+    (options.base?.components ?? []).map((entry) => [entry.id, entry])
+  )
 
-  const serviceUp = health !== null
+  const emit = (components: ComponentReport[]) => {
+    const relevant = components.filter((component) => wanted(component.id))
+
+    if (relevant.length === 0) {
+      return
+    }
+
+    for (const component of relevant) {
+      settled.set(component.id, component)
+    }
+
+    options.onProgress?.(relevant)
+  }
+
+  // Started together, reported apart. `getAppVersion` is local and instant;
+  // `readHealth` may sit waiting for a service that is still starting.
+  const appDone = !wanted("app")
+    ? Promise.resolve()
+    : getAppVersion()
+        .then((installed) => appReport(preferences, installed))
+        .then((component) => emit([component]))
+
+  // Everything below this point comes from `/health`, so a check narrowed to
+  // the app alone can skip the service entirely rather than waiting on it.
+  const needsHealth = ROSTER_ORDER.some((id) => id !== "app" && wanted(id))
+
+  const healthDone = !needsHealth
+    ? Promise.resolve()
+    : Promise.all([
+        readHealth(options.waitForService ?? 0),
+        getServiceStatus(),
+      ]).then(async ([health, status]) => {
+        const serviceUp = health !== null
+
+        // Nothing on disk to read for these two, so they are answered outright.
+        emit([
+          {
+            id: "service",
+            name: "inferno-service",
+            purpose: "The download backend the app talks to.",
+            current: health?.version ?? null,
+            latest: null,
+            state: serviceUp ? stateForOrigin(status) : "unavailable",
+            message: serviceUp
+              ? describeOrigin(status)
+              : "Not running. Downloads cannot start until it is.",
+            url: null,
+            path: null,
+            hash: null,
+            group: "inside",
+          },
+          {
+            id: "python",
+            name: "Python",
+            purpose: "The runtime the service is built on.",
+            current: health?.python_version ?? null,
+            latest: null,
+            state: serviceUp ? "bundled" : "unknown",
+            message: serviceUp
+              ? "Frozen into the service build."
+              : "The service is not running, so this could not be read.",
+            url: null,
+            path: null,
+            hash: null,
+            // The interpreter is compiled into the service's exe, not beside it.
+            group: "inside",
+          },
+        ])
+
+        // The binaries, each held back until its own file has been read through.
+        //
+        // This is the only part of the check that does more than repeat what it
+        // was told. `/health` answers these instantly - the service resolved them
+        // at startup and has cached the result ever since - which is why they used
+        // to settle before anybody could see them move. Hashing the file is the
+        // work that would actually notice one being swapped, and it takes long
+        // enough on an 80 MB executable to be worth showing.
+        await Promise.all(
+          [
+            binaryReport(
+              "ffmpeg",
+              "ffmpeg",
+              "Merges video and audio streams, and converts formats.",
+              health?.ffmpeg,
+              serviceUp
+            ),
+            binaryReport(
+              "ffprobe",
+              "ffprobe",
+              "Reads media details. yt-dlp finds it beside ffmpeg.",
+              health?.ffprobe,
+              serviceUp
+            ),
+            binaryReport(
+              "js-runtime",
+              health?.js_runtime?.name ?? "JS runtime",
+              "Runs the player scripts some sites need to hand over a URL.",
+              health?.js_runtime,
+              serviceUp,
+              "Not found. Some sites will refuse to hand over a download URL."
+            ),
+          ]
+            // Filtered before the hashing rather than inside `emit`, so a check
+            // narrowed to one binary does not read the other two end to end for
+            // an answer it is going to throw away.
+            .filter((component) => wanted(component.id))
+            .map(async (component) => {
+              // Existence first: there is no sense hashing a file that is not
+              // there, and a missing one has a different answer entirely.
+              const present = await verifiedOnDisk(component)
+              const hashed = {
+                ...present,
+                hash:
+                  present.path && present.state !== "unavailable"
+                    ? await hashFile(present.path)
+                    : null,
+              }
+
+              // The JS runtime is the one binary here with a published
+              // upstream, so it gets a real comparison rather than only a
+              // digest - but only the `-ng` fork, which is the only one that
+              // cuts releases. The row stays spinning through both.
+              emit([
+                component.id === "js-runtime" &&
+                (health?.js_runtime?.name ?? "").toLowerCase().includes("-ng")
+                  ? await checkedAgainstRelease(hashed, QUICKJS_NG_REPO)
+                  : hashed,
+              ])
+            })
+        )
+
+        // Needs the version `/health` just reported, so it waits on this wave.
+        emit([await ytDlpReport(health)])
+      })
+
+  await Promise.all([appDone, healthDone])
 
   return {
-    checkedAt: Date.now(),
-    components: [
-      app,
-      {
-        id: "service",
-        name: "inferno-service",
-        purpose: "The download backend the app talks to.",
-        current: health?.version ?? null,
-        latest: null,
-        state: serviceUp ? stateForOrigin(status) : "unavailable",
-        message: serviceUp
-          ? describeOrigin(status)
-          : "Not running. Downloads cannot start until it is.",
-        url: null,
-        path: null,
-      },
-      ytDlp,
-      binaryReport(
-        "ffmpeg",
-        "ffmpeg",
-        "Merges video and audio streams, and converts formats.",
-        health?.ffmpeg,
-        serviceUp
-      ),
-      binaryReport(
-        "ffprobe",
-        "ffprobe",
-        "Reads media details. yt-dlp finds it beside ffmpeg.",
-        health?.ffprobe,
-        serviceUp
-      ),
-      {
-        id: "js-runtime",
-        name: health?.js_runtime?.name ?? "JS runtime",
-        purpose: "Runs the player scripts some sites need to hand over a URL.",
-        current: health?.js_runtime?.version ?? null,
-        latest: null,
-        state: !serviceUp
-          ? "unknown"
-          : health?.js_runtime?.available
-            ? stateForSource(health.js_runtime.source)
-            : "unavailable",
-        message: !serviceUp
-          ? "The service is not running, so this could not be read."
-          : health?.js_runtime?.available
-            ? describeSource(health.js_runtime.source)
-            : "Not found. Some sites will refuse to hand over a download URL.",
-        url: null,
-        path: health?.js_runtime?.path ?? null,
-      },
-      {
-        id: "python",
-        name: "Python",
-        purpose: "The runtime the service is built on.",
-        current: health?.python_version ?? null,
-        latest: null,
-        state: serviceUp ? "bundled" : "unknown",
-        message: serviceUp
-          ? "Frozen into the service build."
-          : "The service is not running, so this could not be read.",
-        url: null,
-        path: null,
-      },
-    ],
+    // A report is only as fresh as its oldest row, so re-checking one
+    // component does not restamp the whole thing as just-checked.
+    checkedAt: only ? (options.base?.checkedAt ?? Date.now()) : Date.now(),
+    // Roster order, not settling order - a list that reshuffles itself
+    // according to which network call happened to answer first is a list
+    // nobody can read twice.
+    components: ROSTER_ORDER.map((id) => settled.get(id)).filter(
+      (entry): entry is ComponentReport => entry !== undefined
+    ),
   }
 }
 
@@ -837,6 +1326,46 @@ export function trackedComponents(report: UpdateReport | null) {
   return report?.components.filter((entry) => entry.state !== "bundled") ?? []
 }
 
+/**
+ * Every row a screen can draw, in roster order and never short.
+ *
+ * Roster order rather than whatever order the answers arrived in, and padded
+ * with a placeholder for anything not yet reported, so a check in progress
+ * draws the same list it will end with instead of growing a row at a time.
+ *
+ * All of them, including the ones that live behind the app's row - splitting
+ * them up is the screen's job, and it does it by `group`.
+ */
+export function displayComponents(
+  report: UpdateReport | null
+): ComponentReport[] {
+  const byId = new Map(
+    (report?.components ?? []).map((entry) => [entry.id, entry])
+  )
+
+  return COMPONENT_ROSTER.map(
+    (entry) =>
+      byId.get(entry.id) ?? {
+        ...entry,
+        current: null,
+        latest: null,
+        state: "unknown",
+        message: null,
+        url: null,
+        path: null,
+        hash: null,
+      }
+  )
+}
+
+/** The rows of one group, ready to render. */
+export function componentsInGroup(
+  report: UpdateReport | null,
+  group: ComponentGroup
+) {
+  return displayComponents(report).filter((entry) => entry.group === group)
+}
+
 /** The shape `versionReport` produces. Stable enough to parse. */
 export type VersionReport = {
   report: "inferno-app version report"
@@ -866,6 +1395,8 @@ export type VersionReport = {
     latest: string | null
     message: string | null
     path: string | null
+    hash: string | null
+    group: ComponentGroup
   }>
 }
 
@@ -911,6 +1442,8 @@ export function versionReport(report: UpdateReport, feed: FeedKind): string {
       latest: entry.latest,
       message: entry.message,
       path: entry.path,
+      hash: entry.hash,
+      group: entry.group,
     })),
   }
 
@@ -923,18 +1456,79 @@ const lastCheckStorageKey = "inferno-app.updates.last-check"
 const changedEvent = "inferno-app:update-check-changed"
 
 export type UpdateCheckState = {
-  /** The last completed check, from any window, or null if there is none. */
+  /**
+   * The last completed check - or, while one is running, that check filling
+   * in. Rows keep their previous answers until a new one replaces them, so
+   * the list never blanks and then repopulates.
+   */
   report: UpdateReport | null
   /** Whether one is running right now. */
   checking: boolean
+  /** Which components are still waiting on an answer, for their spinners. */
+  pending: readonly UpdateComponentId[]
+  /** Which components are being fetched right now. */
+  repairing: readonly UpdateComponentId[]
 }
 
-let checking = false
-let inflight: Promise<UpdateReport> | null = null
+/**
+ * Which components have a check out on them right now.
+ *
+ * A set rather than a single in-flight promise, because checks are no longer
+ * one at a time: right-clicking three rows in a row starts three, and each
+ * only owns the components it asked for. What stops two of them colliding is
+ * that a component already in here is never handed to a second check.
+ */
+const claimed = new Set<UpdateComponentId>()
+let pending: readonly UpdateComponentId[] = []
+/** How many checks are out, so the last one home knows to write the result. */
+let running = 0
+/**
+ * The report every check in flight is folding its answers into.
+ *
+ * One shared object rather than one per check, and written to storage only
+ * when the last of them finishes. Two concurrent checks each storing their own
+ * merged copy would have the slower one overwrite the faster one's rows with
+ * the stale versions it started from.
+ */
+let live: UpdateReport | null = null
+/** Handed back to a caller whose components are already spoken for. */
+let latest: Promise<UpdateReport> | null = null
+
+/**
+ * Bumped by every announcement.
+ *
+ * `getSnapshot` has to hand React a stable object, and while a check is
+ * running the thing that changes is module state rather than the stored JSON -
+ * so the cache is keyed on this as well as on what is in storage.
+ */
+let revision = 0
 
 function announce() {
+  revision += 1
+
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(changedEvent))
+  }
+}
+
+/** The running report with one wave of answers folded in, in roster order. */
+function foldIn(
+  base: UpdateReport | null,
+  components: ComponentReport[]
+): UpdateReport {
+  const byId = new Map(
+    (base?.components ?? []).map((entry) => [entry.id, entry])
+  )
+
+  for (const component of components) {
+    byId.set(component.id, component)
+  }
+
+  return {
+    checkedAt: base?.checkedAt ?? Date.now(),
+    components: ROSTER_ORDER.map((id) => byId.get(id)).filter(
+      (entry): entry is ComponentReport => entry !== undefined
+    ),
   }
 }
 
@@ -975,35 +1569,351 @@ export function loadLastCheck(): UpdateReport | null {
 /**
  * Run a check and remember the result.
  *
- * One at a time, deliberately. The launch check and a click on "Check now" can
- * land together, and running both would double every request to answer one
- * question - against GitHub's unauthenticated rate limit that is a real cost.
- * Whoever asks second gets the answer the first is already waiting for.
+ * Several can be out at once - one per row, if somebody works down the list
+ * right-clicking - and they share one report rather than each keeping their
+ * own. What is *not* allowed is two checks on the same component: whoever
+ * asked second is handed the first one's promise, so a doubled click costs one
+ * request rather than two against GitHub's unauthenticated rate limit.
+ *
+ * The last check home writes the result. Storing per-check would let a slow
+ * one finish after a fast one and overwrite its rows with the stale versions
+ * it had started from.
  */
 export function checkForUpdates(
   preferences: UpdatePreferences,
-  options: { waitForService?: number } = {}
+  options: {
+    waitForService?: number
+    only?: readonly UpdateComponentId[]
+    /** Skip the repair pass. Set by the re-check a repair itself runs. */
+    skipRepair?: boolean
+  } = {}
 ): Promise<UpdateReport> {
-  if (inflight) {
-    return inflight
+  const requested = options.only ?? ROSTER_ORDER
+  const targets = requested.filter((id) => !claimed.has(id))
+
+  // Everything asked for is already being looked at. Nothing to start, and
+  // the answer is whatever the check that owns them resolves to.
+  if (targets.length === 0) {
+    return latest ?? Promise.resolve(live ?? loadLastCheck() ?? emptyReport())
   }
 
-  checking = true
+  // Only the first check in seeds the shared report - the ones that join it
+  // must not reset it back to what is on disk and lose the rows already
+  // answered. Starting from the last answer rather than from nothing is what
+  // lets a re-check show the previous versions with spinners over them
+  // instead of emptying the screen and filling it back in.
+  if (running === 0) {
+    live = loadLastCheck()
+  }
+
+  running += 1
+  for (const id of targets) {
+    claimed.add(id)
+  }
+  pending = [...claimed]
   announce()
 
-  inflight = runUpdateCheck(preferences, options)
-    .then((report) => {
-      storeReport(report)
+  const settle = (components: ComponentReport[]) => {
+    live = foldIn(live, components)
 
-      return report
+    for (const component of components) {
+      claimed.delete(component.id)
+    }
+
+    pending = [...claimed]
+    announce()
+  }
+
+  const promise = runUpdateCheck(preferences, {
+    ...options,
+    only: targets,
+    base: live,
+    onProgress: settle,
+  })
+    .then(async (report) => {
+      // A whole check is what makes the report freshly dated; a narrowed one
+      // leaves the timestamp where it was, because most of it is untouched.
+      live = foldIn(live, report.components)
+      if (!options.only) {
+        live = { ...live, checkedAt: report.checkedAt }
+      }
+
+      // Repairs run here, on the finished report, rather than as each answer
+      // landed. Components are reported one at a time, so a repair started
+      // mid-check saw a half-written picture: ffmpeg would go missing, start
+      // its own repair, and read ffprobe's *previous* state - still fine,
+      // because ffprobe's answer had not arrived yet - and so leave it behind.
+      // Waiting for the whole report is what makes "both are missing" a thing
+      // the repair can actually see.
+      //
+      // Awaited, so a check does not resolve until the install is in the state
+      // it is about to report.
+      if (!options.skipRepair) {
+        await repairMissing(live, preferences)
+      }
+
+      return live
     })
     .finally(() => {
-      inflight = null
-      checking = false
+      running -= 1
+
+      // Anything this check claimed and never answered - it threw, or the
+      // component was skipped - is released here so a later one can try it.
+      for (const id of targets) {
+        claimed.delete(id)
+      }
+
+      pending = [...claimed]
+
+      if (running === 0 && live) {
+        storeReport(live)
+        // Cleared after the write, so the snapshot falls back to the freshly
+        // stored report rather than to the one it replaced.
+        live = null
+        latest = null
+      }
+
       announce()
     })
 
-  return inflight
+  latest = promise
+
+  return promise
+}
+
+/** A report about nothing, for the callers that must be handed one. */
+function emptyReport(): UpdateReport {
+  return { checkedAt: Date.now(), components: [] }
+}
+
+// --- putting a missing file back -------------------------------------------
+
+/**
+ * Components a repair is running for right now.
+ *
+ * Claimed synchronously the moment a repair is entered, before anything is
+ * awaited, which is what stops the automatic trigger from starting the same
+ * work twice. It matters most for ffmpeg, whose archive also carries ffprobe:
+ * both are queued together, and without a synchronous claim both would reach
+ * the download and fetch the same hundred megabytes.
+ */
+const inProgress = new Set<UpdateComponentId>()
+
+/** `inProgress` as something the snapshot can hand out by reference. */
+let repairing: readonly UpdateComponentId[] = []
+
+function claimRepair(ids: readonly UpdateComponentId[], claimed: boolean) {
+  for (const id of ids) {
+    if (claimed) {
+      inProgress.add(id)
+    } else {
+      inProgress.delete(id)
+    }
+  }
+
+  repairing = [...inProgress]
+  announce()
+}
+
+/**
+ * Put one group of missing binaries back, by fetching them.
+ *
+ * A group is the set of components a single download would satisfy - ffmpeg's
+ * archive carries ffprobe - narrowed to the ones actually missing. Passing
+ * them together is what lets one fetch serve both, and what stops a repair
+ * from touching a file that was never broken.
+ *
+ * Nothing is reported as it goes. One archive serving two binaries means one
+ * transfer and one number, and putting that number behind both rows drew two
+ * bars advancing in lockstep, which reads as a rendering fault rather than as
+ * a download. The rows say they are downloading and leave it at that.
+ *
+ * Nothing here is gated on having been tried before. A repair that worked
+ * leaves the files on disk and the next pass sees that and stops; a repair
+ * that failed simply gets tried again by the next check.
+ */
+async function repairGroup(group: readonly UpdateComponentId[]): Promise<void> {
+  const covered = group.filter((id) => !inProgress.has(id))
+
+  if (covered.length === 0) {
+    return
+  }
+
+  const id = covered[0]
+  const source = DOWNLOAD_SOURCES[id]
+  const report = live ?? loadLastCheck()
+
+  // Claimed before the first await, so a second pass finds the work taken.
+  claimRepair(covered, true)
+
+  try {
+    // Every component this repair is for, and where each one belongs. One
+    // archive can land in several places - ffmpeg's zip carries ffprobe - so
+    // each needs its own destination resolved. The earlier version resolved
+    // only the first, which is why a pair that went missing together came
+    // back one at a time.
+    const targets = (
+      await Promise.all(
+        covered.map(async (other) => {
+          const otherRelative = VENDOR_RELATIVE[other]
+
+          if (!otherRelative) {
+            return null
+          }
+
+          // Where the file was, if the service ever managed to resolve one -
+          // and otherwise where it goes. The second case is the common one: a
+          // binary that was never found has no path to put back, only a place
+          // it belongs.
+          const known = report?.components.find(
+            (entry) => entry.id === other
+          )?.path
+          const destination = known ?? (await vendorPath(otherRelative))
+
+          return destination
+            ? { id: other, relative: otherRelative, destination }
+            : null
+        })
+      )
+    ).filter((target) => target !== null)
+
+    // Anything already on disk needs nothing doing to it. The row can still
+    // say it is downloading - the service resolved its paths at startup and
+    // only a restart changes that - and fetching a file that exists would
+    // achieve nothing except starting this again on the check that followed.
+    const outstanding: typeof targets = []
+
+    for (const target of targets) {
+      if ((await verifyBinary(target.destination)) !== true) {
+        outstanding.push(target)
+      }
+    }
+
+    if (outstanding.length === 0) {
+      return
+    }
+
+    // Nowhere trustworthy to ask.
+    if (!source) {
+      throw new Error(
+        `There is no source this build can fetch ${outstanding.map((target) => target.id).join(", ")} from.`
+      )
+    }
+
+    const release = await githubRelease(source.repo)
+    const asset = release?.assets.find((entry) => source.asset(entry.name))
+
+    if (!asset) {
+      throw new Error(
+        `${source.repo}'s latest release has no file this build can use.`
+      )
+    }
+
+    // Unpacked into the slots that are empty, not into every slot the archive
+    // happens to contain. An ffprobe that was never missing is left alone -
+    // replacing it would change a file nobody asked about and leave the hash
+    // on screen describing the copy that used to be there.
+    const members = source.extract
+      ? outstanding.map((target) => ({
+          name: fileNameOf(target.destination),
+          destination: target.destination,
+        }))
+      : []
+
+    await downloadBinary(
+      outstanding[0].destination,
+      asset.url,
+      undefined,
+      members.length > 0 ? members : undefined,
+      source.checksum?.(asset.name)
+    )
+
+    // No re-check here. `repairMissing` does one for every group it ran, in
+    // one pass, with repairs switched off - doing it per group would mean a
+    // check per group, and one of them recursing back into repairing.
+  } catch (error) {
+    // Nobody asked for this, so nobody is waiting on a dialog about it. The
+    // row still reads as missing, which is the honest state, and the next
+    // check will try again.
+    console.warn(`Could not put ${id} back:`, error)
+  } finally {
+    claimRepair(covered, false)
+  }
+}
+
+/** The last segment of a path, whichever slash the platform uses. */
+function fileNameOf(path: string) {
+  return path.split(/[\\/]/).pop() ?? path
+}
+
+/**
+ * Put back everything a finished check found missing, then look again.
+ *
+ * Run once, on the whole report, which is the point. Repairing as each answer
+ * arrived meant deciding what a repair covered from a half-written picture -
+ * ffmpeg would go missing, start repairing, and read ffprobe as still fine
+ * because ffprobe's answer had not landed yet. Both were deleted; only one
+ * came back.
+ *
+ * Automatic because a missing binary is not a decision to put to anybody: it
+ * is broken, and the fix is a download the app already knows how to do.
+ */
+async function repairMissing(
+  report: UpdateReport | null,
+  preferences: UpdatePreferences
+): Promise<void> {
+  // Deliberately not conditional on a component having a path. The case that
+  // matters most is the one where the service resolved nothing at all and
+  // reported none - a binary missing outright rather than missing from where
+  // it was, and the one most worth putting back.
+  const missing = (report?.components ?? []).filter(
+    (entry) => entry.state === "unavailable" && VENDOR_RELATIVE[entry.id]
+  )
+
+  if (missing.length === 0) {
+    return
+  }
+
+  const handled = new Set<UpdateComponentId>()
+  const attempted: UpdateComponentId[] = []
+
+  for (const component of missing) {
+    if (handled.has(component.id)) {
+      continue
+    }
+
+    // Everything one download would satisfy, narrowed to what is missing.
+    // Grouped here, where the whole report is known, so a pair that went
+    // missing together is one fetch rather than two.
+    const source = DOWNLOAD_SOURCES[component.id]
+    const group = [
+      component.id,
+      ...(source?.extract ?? []).filter(
+        (other) =>
+          other !== component.id && missing.some((entry) => entry.id === other)
+      ),
+    ]
+
+    for (const id of group) {
+      handled.add(id)
+    }
+
+    await repairGroup(group)
+    attempted.push(...group)
+  }
+
+  if (attempted.length === 0) {
+    return
+  }
+
+  // Look again at what was touched, so the check finishes describing the
+  // install as it now is. `skipRepair` because this pass has already done
+  // everything it can - without it, a component that could not be put back
+  // would start the whole thing over.
+  await checkForUpdates(preferences, {
+    only: attempted,
+    skipRepair: true,
+  }).catch(() => {})
 }
 
 /**
@@ -1013,10 +1923,15 @@ export function checkForUpdates(
  * in `localStorage`, which is an external store, and reading it in an effect
  * would render once empty and again with the real thing.
  */
-const idleState: UpdateCheckState = { report: null, checking: false }
+const idleState: UpdateCheckState = {
+  report: null,
+  checking: false,
+  pending: [],
+  repairing: [],
+}
 
 let snapshotSource: string | null = null
-let snapshotChecking = false
+let snapshotRevision = -1
 let snapshotValue: UpdateCheckState = idleState
 
 function getSnapshot(): UpdateCheckState {
@@ -1024,10 +1939,15 @@ function getSnapshot(): UpdateCheckState {
 
   // Rebuilt only when something it is made of moved - `getSnapshot` has to
   // return a stable reference, or React re-renders forever.
-  if (raw !== snapshotSource || checking !== snapshotChecking) {
+  if (raw !== snapshotSource || revision !== snapshotRevision) {
     snapshotSource = raw
-    snapshotChecking = checking
-    snapshotValue = { report: raw ? safeParse(raw) : null, checking }
+    snapshotRevision = revision
+    snapshotValue = {
+      report: live ?? (raw ? safeParse(raw) : null),
+      checking: running > 0,
+      pending,
+      repairing,
+    }
   }
 
   return snapshotValue

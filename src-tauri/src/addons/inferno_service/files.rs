@@ -7,8 +7,8 @@
 //! object (`job.directory`, `file.path`), exactly as SPEC §4.5 describes.
 
 use std::path::{Path, PathBuf};
-// Only the non-Windows handlers spawn a process; Windows uses ShellExecuteW.
-#[cfg(not(windows))]
+// The download shells out to curl everywhere. Opening and revealing files
+// spawns a process too, but only off Windows - there ShellExecuteW does it.
 use std::process::Command;
 
 use super::error::{ServiceError, ServiceResult};
@@ -307,6 +307,400 @@ fn place_download(source: &str, folder: &str) -> ServiceResult<String> {
     Ok(display_path(&target))
 }
 
+/// Is the file the service resolved still on disk?
+///
+/// Worth asking because `/health` cannot: the service resolves its binaries
+/// once at startup and caches the result for the rest of its life, so a file
+/// deleted afterwards still reports as present and everything downstream
+/// believes an install that no longer exists.
+#[tauri::command]
+pub fn inferno_verify_binary(path: String) -> bool {
+    Path::new(&path).is_file()
+}
+
+/// The name a vendored binary goes by on this platform.
+fn vendor_file_name(relative: &str) -> String {
+    if cfg!(windows) && !relative.ends_with(".exe") {
+        format!("{relative}.exe")
+    } else {
+        relative.to_string()
+    }
+}
+
+/// Where a vendored binary belongs, whether or not one is there now.
+///
+/// The first vendor root, which is the one the service is pointed at when it
+/// spawns - so a file put here is the file it will resolve next time it looks.
+/// Needed because the interesting case is the one where nothing resolved at
+/// all: `/health` then reports no path, and "put it back where it was" has to
+/// become "put it where it goes".
+#[tauri::command]
+pub fn inferno_vendor_path(app: tauri::AppHandle, bundled: String) -> ServiceResult<String> {
+    let root = super::process::vendor_dir(&app).ok_or_else(|| ServiceError::Io {
+        message: "This build has no vendor directory to put a replacement in.".into(),
+    })?;
+
+    Ok(display_path(&root.join(vendor_file_name(&bundled))))
+}
+
+/// Fetch a replacement over HTTPS, reporting how far along it is.
+///
+/// Shelled out to `curl` rather than done with an HTTP crate. That is a real
+/// trade and worth naming: `reqwest` is already in the tree but carries no TLS
+/// backend, and every way of giving it one pulls in a stack this project would
+/// otherwise not build - so the choice was between a large new dependency and
+/// the HTTPS client that Windows, macOS and most Linux installs already ship.
+/// curl verifies certificates properly, which is the part that matters.
+///
+/// The frontend cannot do this itself: GitHub serves release assets with no
+/// `Access-Control-Allow-Origin`, so a `fetch` from the webview is refused.
+///
+/// Written to a `.part` beside the target and moved into place only once the
+/// digest agrees, so an interrupted download can never be mistaken for a
+/// working binary.
+/// One file to lift out of a downloaded archive.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ExtractTarget {
+    /// The entry's own file name, ignoring whatever folders it sits in -
+    /// these archives put everything under a versioned directory.
+    pub name: String,
+    /// Where it should end up.
+    pub destination: String,
+}
+
+#[tauri::command]
+pub async fn inferno_download_binary(
+    path: String,
+    url: String,
+    sha256: Option<String>,
+    checksum_url: Option<String>,
+    extract: Option<Vec<ExtractTarget>>,
+) -> ServiceResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        download_binary(
+            &path,
+            &url,
+            sha256.as_deref(),
+            checksum_url.as_deref(),
+            extract.as_deref(),
+        )
+    })
+    .await
+    .map_err(|err| ServiceError::Io {
+        message: format!("the download did not finish: {err}"),
+    })?
+}
+
+/// Fetch a published digest and pull the hash out of it.
+///
+/// Fetched here rather than in the frontend because the file lives on the
+/// build host's own site, which sends no CORS headers - the webview would be
+/// refused. Doing it in the same command as the download also means the two
+/// cannot drift: one call, one answer, verified before anything is moved into
+/// place.
+///
+/// The format is not standardised. Some publish a bare hash, some the
+/// `sha256sum` form of `<hash>  <filename>`, so the first 64 hex characters
+/// are taken and the rest ignored.
+fn fetch_checksum(url: &str) -> ServiceResult<String> {
+    let checked = checked_url(url)?;
+    if !checked.starts_with("https://") {
+        return Err(ServiceError::Io {
+            message: "A checksum may only be fetched over HTTPS.".into(),
+        });
+    }
+
+    let mut command = Command::new("curl");
+    command.args([
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--tlsv1.2",
+        "--max-time",
+        "30",
+    ]);
+    command.arg(&checked);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+
+    let output = command.output().map_err(|err| ServiceError::Io {
+        message: format!("could not fetch the checksum: {err}"),
+    })?;
+
+    if !output.status.success() {
+        return Err(ServiceError::Io {
+            message: "The published checksum could not be fetched.".into(),
+        });
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let digest: String = text
+        .chars()
+        .skip_while(|c| !c.is_ascii_hexdigit())
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+
+    if digest.len() != 64 {
+        return Err(ServiceError::Io {
+            message: "The published checksum was not a SHA-256.".into(),
+        });
+    }
+
+    Ok(digest)
+}
+
+/// Pull the wanted files out of a downloaded archive.
+///
+/// Matched on file name alone, because these archives wrap everything in a
+/// folder named after the version - `ffmpeg-9.0.1-essentials_build/bin/` - so
+/// a full path would have to be guessed afresh with every release.
+///
+/// Nothing is written straight to its destination: each file lands beside it
+/// and is renamed into place, so a half-extracted executable is never left
+/// somewhere the service might pick it up.
+fn extract_from_archive(archive: &Path, targets: &[ExtractTarget]) -> ServiceResult<()> {
+    let file = std::fs::File::open(archive).map_err(|err| ServiceError::Io {
+        message: format!("could not open the download: {err}"),
+    })?;
+
+    let mut zip = zip::ZipArchive::new(file).map_err(|err| ServiceError::Io {
+        message: format!("the download is not a readable archive: {err}"),
+    })?;
+
+    for target in targets {
+        let mut found = false;
+
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index).map_err(|err| ServiceError::Io {
+                message: format!("could not read the archive: {err}"),
+            })?;
+
+            // `enclosed_name` refuses paths that climb out of the archive, so
+            // a crafted zip cannot write over something elsewhere on disk.
+            let Some(entry_path) = entry.enclosed_name() else {
+                continue;
+            };
+
+            if entry_path.file_name().and_then(|name| name.to_str()) != Some(target.name.as_str()) {
+                continue;
+            }
+
+            let destination = PathBuf::from(&target.destination);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| ServiceError::Io {
+                    message: format!("could not create {}: {err}", parent.display()),
+                })?;
+            }
+
+            let staged = destination.with_extension("unpacking");
+            let mut out = std::fs::File::create(&staged).map_err(|err| ServiceError::Io {
+                message: format!("could not write {}: {err}", staged.display()),
+            })?;
+
+            std::io::copy(&mut entry, &mut out).map_err(|err| ServiceError::Io {
+                message: format!("could not unpack {}: {err}", target.name),
+            })?;
+            drop(out);
+
+            std::fs::rename(&staged, &destination).map_err(|err| ServiceError::Io {
+                message: format!("could not put {} in place: {err}", destination.display()),
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755));
+            }
+
+            found = true;
+            break;
+        }
+
+        if !found {
+            return Err(ServiceError::Io {
+                message: format!("the download contained no {}.", target.name),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn download_binary(
+    path: &str,
+    url: &str,
+    sha256: Option<&str>,
+    checksum_url: Option<&str>,
+    extract: Option<&[ExtractTarget]>,
+) -> ServiceResult<String> {
+    // The same validation the "open this link" command uses, plus a refusal of
+    // plain HTTP - this one ends in an executable on disk.
+    let checked = checked_url(url)?;
+    if !checked.starts_with("https://") {
+        return Err(ServiceError::Io {
+            message: "A replacement may only be fetched over HTTPS.".into(),
+        });
+    }
+
+    let target = PathBuf::from(path);
+    let parent = target.parent().ok_or_else(|| ServiceError::Io {
+        message: format!("{path} has nowhere to be written to."),
+    })?;
+
+    std::fs::create_dir_all(parent).map_err(|err| ServiceError::Io {
+        message: format!("could not create {}: {err}", parent.display()),
+    })?;
+
+    let partial = parent.join(format!(
+        "{}.part",
+        target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download".into())
+    ));
+    let _ = std::fs::remove_file(&partial);
+
+    let mut command = Command::new("curl");
+    command.args([
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        // Redirects are followed, so every hop has to stay on HTTPS too.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--tlsv1.2",
+        "--output",
+    ]);
+    command.arg(&partial);
+    command.arg(&checked);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window flashing up behind the app.
+        command.creation_flags(0x0800_0000);
+    }
+
+    let outcome = command.status().map_err(|err| ServiceError::Io {
+        message: format!("could not start curl: {err}"),
+    })?;
+
+    if !outcome.success() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(ServiceError::Io {
+            message: format!("the download failed ({outcome})."),
+        });
+    }
+
+    // A digest handed in directly wins; otherwise one is fetched from wherever
+    // the build was published. Resolved before the file is hashed so a failure
+    // to get it stops the repair rather than silently skipping verification.
+    let expected = match sha256 {
+        Some(value) => Some(value.to_owned()),
+        None => match checksum_url {
+            Some(url) => Some(fetch_checksum(url).inspect_err(|_| {
+                let _ = std::fs::remove_file(&partial);
+            })?),
+            None => None,
+        },
+    };
+
+    if let Some(expected) = expected {
+        let actual = sha256_file(&partial)?;
+        if !actual.eq_ignore_ascii_case(&expected) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(ServiceError::Io {
+                message: "The download did not match its published checksum.".into(),
+            });
+        }
+    }
+
+    // An archive is not the answer, it contains the answer. The wanted files
+    // are lifted out and the download itself is thrown away, so nothing is
+    // left behind for the resolver to trip over.
+    if let Some(targets) = extract.filter(|targets| !targets.is_empty()) {
+        let unpacked = extract_from_archive(&partial, targets);
+        let _ = std::fs::remove_file(&partial);
+        unpacked?;
+
+        return Ok(targets[0].destination.clone());
+    }
+
+    std::fs::rename(&partial, &target).map_err(|err| ServiceError::Io {
+        message: format!("could not put {} in place: {err}", target.display()),
+    })?;
+
+    // Downloaded binaries arrive without the bit that lets them run.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+    }
+
+    Ok(display_path(&target))
+}
+
+/// SHA-256 of a file, whole.
+///
+/// Deliberately not `library::signature`, which hashes only both ends of a
+/// file: that answers "is this the same download?" cheaply for multi-gigabyte
+/// video, and explicitly does not prove a file is what it claims to be. This
+/// one is for the bundled binaries, where the whole point is a digest somebody
+/// can hold against a published checksum - so every byte goes in, and the
+/// couple of hundred milliseconds that costs on an 80 MB executable is the
+/// price of the answer being worth anything.
+///
+/// Streamed in chunks rather than read whole: `ffmpeg.exe` is large enough
+/// that loading it into memory to hash it would be a visible cost for nothing.
+#[tauri::command]
+pub async fn inferno_hash_file(path: String) -> ServiceResult<String> {
+    tauri::async_runtime::spawn_blocking(move || sha256_file(&checked(&path)?))
+        .await
+        .map_err(|err| ServiceError::Io {
+            message: format!("hashing did not finish: {err}"),
+        })?
+}
+
+/// The digest itself, split out so it can be tested without an app handle.
+fn sha256_file(target: &Path) -> ServiceResult<String> {
+    use std::io::Read;
+
+    use sha2::{Digest, Sha256};
+
+    let mut file = std::fs::File::open(target).map_err(|err| ServiceError::Io {
+        message: format!("could not read {}: {err}", target.display()),
+    })?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| ServiceError::Io {
+            message: format!("could not read {}: {err}", target.display()),
+        })?;
+
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Open a file or folder with whatever the OS considers its default handler.
 #[tauri::command]
 pub fn inferno_open_path(path: String) -> ServiceResult<()> {
@@ -385,6 +779,50 @@ pub fn inferno_reveal_path(path: String) -> ServiceResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest is the whole point of the feature, so it is pinned to
+    /// known-good values rather than to whatever the code happens to produce.
+    ///
+    /// `abc` is the SHA-256 test vector everyone publishes; the empty file is
+    /// the other one. Both come from outside this codebase, which is what
+    /// makes them worth asserting.
+    #[test]
+    fn hashes_match_the_published_vectors() {
+        let folder = scratch("hash-vectors");
+
+        let empty = folder.join("empty");
+        std::fs::write(&empty, b"").expect("write");
+        assert_eq!(
+            sha256_file(&empty).expect("hash"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        let abc = folder.join("abc");
+        std::fs::write(&abc, b"abc").expect("write");
+        assert_eq!(
+            sha256_file(&abc).expect("hash"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Guards the chunked read: a file larger than the 64 KiB buffer has to
+    /// hash the same as one held in memory, or every large binary - which is
+    /// all of the ones this exists for - would get a wrong answer.
+    #[test]
+    fn hashing_survives_more_than_one_chunk() {
+        use sha2::{Digest, Sha256};
+
+        let folder = scratch("hash-chunks");
+        let file = folder.join("big");
+
+        // Deliberately not a round multiple of the buffer, so the final short
+        // read is exercised too.
+        let bytes: Vec<u8> = (0..200_000u32).map(|index| (index % 251) as u8).collect();
+        std::fs::write(&file, &bytes).expect("write");
+
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(sha256_file(&file).expect("hash"), expected);
+    }
 
     /// A folder of its own per test, so they can run in any order at once.
     fn scratch(name: &str) -> PathBuf {

@@ -34,6 +34,43 @@ export const tauriWindow = {
     return (await (await currentWindow())?.isMaximized()) ?? false
   },
   /**
+   * Fill the app's own taskbar button with a progress bar.
+   *
+   * Windows draws it into the button itself, macOS into the dock icon, and
+   * Linux only under desktops that implement the Unity launcher protocol - so
+   * this is a nicety everywhere and a no-op in a browser.
+   *
+   * `percent` is 0 to 100, or null for a job whose size nothing has reported
+   * yet: an indeterminate bar says "working" honestly, where a determinate 0%
+   * says "stuck". Passing `"none"` clears it.
+   */
+  setProgress: async (
+    status: "none" | "normal" | "indeterminate" | "error",
+    percent?: number | null
+  ) => {
+    const appWindow = await currentWindow()
+
+    if (!appWindow) {
+      return
+    }
+
+    const { ProgressBarStatus } = await import("@tauri-apps/api/window")
+
+    await appWindow.setProgressBar({
+      status:
+        status === "none"
+          ? ProgressBarStatus.None
+          : status === "error"
+            ? ProgressBarStatus.Error
+            : status === "indeterminate"
+              ? ProgressBarStatus.Indeterminate
+              : ProgressBarStatus.Normal,
+      ...(percent === null || percent === undefined
+        ? {}
+        : { progress: Math.max(0, Math.min(100, Math.round(percent))) }),
+    })
+  },
+  /**
    * Subscribes to window resizes. Returns a synchronous cleanup function so it
    * can be handed straight back from a `useEffect`, even though the underlying
    * listener is registered asynchronously.

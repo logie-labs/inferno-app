@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, type ReactNode, useState } from "react"
 import {
   RiAlertLine,
   RiCheckLine,
@@ -41,7 +41,10 @@ const TONE: Record<
   { className: string; icon: typeof RiCheckLine }
 > = {
   ok: { className: "text-muted-foreground", icon: RiCheckLine },
-  will_create: { className: "text-sky-700 dark:text-sky-400", icon: RiFolderAddLine },
+  will_create: {
+    className: "text-sky-700 dark:text-sky-400",
+    icon: RiFolderAddLine,
+  },
   not_a_directory: { className: "text-destructive", icon: RiAlertLine },
   unwritable: { className: "text-destructive", icon: RiAlertLine },
   no_parent: { className: "text-destructive", icon: RiAlertLine },
@@ -61,6 +64,7 @@ export function FolderField({
   placeholder,
   fallback,
   emptyHint,
+  action,
   className,
 }: {
   value: string
@@ -77,6 +81,13 @@ export function FolderField({
   fallback?: string
   /** Shown instead of a check when the field is empty. */
   emptyHint?: string
+  /**
+   * An extra control on the end of the row.
+   *
+   * For fields that compose a path rather than bind one - the save-location
+   * list adds what has been typed, instead of the typing being the change.
+   */
+  action?: ReactNode
   className?: string
 }) {
   const [check, setCheck] = useState<{
@@ -165,6 +176,8 @@ export function FolderField({
         >
           <RiExternalLinkLine />
         </Button>
+
+        {action}
       </div>
 
       {/* The row is always here, so nothing jumps when an answer arrives. */}

@@ -31,6 +31,12 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 tauri-plugin-dialog = "2"
 
+# Unpacking a downloaded ffmpeg. Its builds ship as zips - two executables
+# inside a versioned folder - so a replacement cannot simply be written to
+# disk the way a bare `qjs.exe` can. Deflate only: that is what these archives
+# use, and the other codecs would be dead weight.
+zip = { version = "6", default-features = false, features = ["deflate"] }
+
 # Job objects: the only reliable way to guarantee the service child dies with
 # the app on Windows, including on a hard kill. See addons/inferno_service.
 [target.'cfg(windows)'.dependencies.windows]

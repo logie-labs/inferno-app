@@ -221,6 +221,70 @@ pub async fn inferno_pick_directory(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+/// A folder the operating system already has a name for.
+///
+/// Offered so the common answers - Downloads, Videos, Music - cost a click
+/// rather than a typed path, and so they are right on a machine where those
+/// folders are not where they usually are: they come from the OS rather than
+/// from a string this app assembled.
+#[derive(Debug, Clone, Serialize)]
+pub struct KnownFolder {
+    /// Stable across machines and languages, unlike the path or the label.
+    /// Stored with a saved folder so it can be re-resolved on another install.
+    pub id: String,
+    /// What to call it on screen.
+    pub label: String,
+    pub path: String,
+    /// Whether it is there right now. A `false` is not a problem - it is the
+    /// normal state of the temporary folder, which is made when first used.
+    pub exists: bool,
+}
+
+fn known_folder(id: &str, label: &str, path: Option<PathBuf>) -> Option<KnownFolder> {
+    let path = path?;
+
+    Some(KnownFolder {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        exists: path.is_dir(),
+        path: path.to_string_lossy().into_owned(),
+    })
+}
+
+/// The folders worth offering without anybody having to type a path.
+///
+/// Every one is asked for rather than assumed: `~/Downloads` is wrong on a
+/// machine where the folder has been redirected, and wrong in every language
+/// that does not call it that.
+///
+/// The temporary folder is in the list because it is a legitimate answer to
+/// "where should this go" - somewhere to put a file you are about to watch
+/// once and not keep - and it is given its own subfolder rather than the bare
+/// temp directory, which is a shared space this app should not be scattering
+/// media across.
+#[tauri::command]
+pub fn inferno_known_folders(app: tauri::AppHandle) -> Vec<KnownFolder> {
+    use tauri::Manager;
+
+    let resolver = app.path();
+
+    [
+        known_folder("downloads", "Downloads", resolver.download_dir().ok()),
+        known_folder("videos", "Videos", resolver.video_dir().ok()),
+        known_folder("music", "Music", resolver.audio_dir().ok()),
+        known_folder("desktop", "Desktop", resolver.desktop_dir().ok()),
+        known_folder("documents", "Documents", resolver.document_dir().ok()),
+        known_folder(
+            "temporary",
+            "Temporary",
+            Some(std::env::temp_dir().join("Inferno")),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -238,6 +238,27 @@ impl Layout {
     }
 }
 
+/// The vendor directory the service is actually reading from.
+///
+/// Resolved through `Layout` rather than assumed, because the two builds do
+/// not agree: a packaged app reads from its resource directory, a checkout run
+/// reads from `service/vendor`, and a replacement written to the wrong one
+/// would sit there unused while the row kept saying the file was missing.
+///
+/// Falls back to the packaged location when nothing resolves at all - that is
+/// the case where the service could not start, and it is still the best guess
+/// at where its binaries belong.
+pub(super) fn vendor_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(layout) = Layout::resolve(app) {
+        return Some(layout.vendor);
+    }
+
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|resources| resources.join("vendor"))
+}
+
 fn executable_name() -> &'static str {
     if cfg!(windows) {
         "inferno-service.exe"
