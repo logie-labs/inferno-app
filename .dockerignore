@@ -1,0 +1,45 @@
+# The container builds the frontend from source and installs the service from
+# `service/`. Everything else in this repo is either a desktop-only concern or
+# a build artefact that would be copied in only to be overwritten.
+
+# Dependencies and build output - all regenerated inside the image. Copying the
+# host's node_modules would also drag in platform-specific binaries built for
+# Windows, which is worse than useless in a Linux image.
+node_modules
+.next
+out
+ds-bundle
+tsconfig.tsbuildinfo
+
+# The desktop shell. The container has no Tauri, and `target/` is gigabytes.
+src-tauri
+
+# The Python service's local development state, not its source.
+service/.venv
+service/build
+service/dist
+service/downloads
+service/vendor
+service/inferno_service.egg-info
+**/__pycache__
+*.py[cod]
+.pytest_cache
+
+# Downloads made while developing on the host.
+downloads
+
+# Repo and editor noise.
+.git
+.gitignore
+.vscode
+.idea
+*.log
+.env
+.env.local
+.DS_Store
+
+# Docs and config that never affect the build.
+LICENSE
+README.md
+AGENTS.md
+next_prompt

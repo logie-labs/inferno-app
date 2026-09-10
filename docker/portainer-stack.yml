@@ -1,0 +1,83 @@
+# Inferno server, for Portainer.
+#
+# Unlike docker-compose.yml beside it, this pulls a published image instead of
+# building one - Portainer's build support is awkward and a stack should not
+# need a toolchain on the host.
+#
+# In Portainer: Stacks -> Add stack -> Repository
+#   Repository URL      https://github.com/logie-labs/inferno-app
+#   Compose path        docker/portainer-stack.yml
+#   GitOps updates      on, and pick one:
+#     - Polling: Portainer re-reads this file on an interval. Use it when you
+#       want compose changes (a new port, a new variable) to land on their own.
+#     - Webhook: Portainer gives you a URL; call it to redeploy on demand.
+#
+# Neither of those notices a *new image under the same tag*, which is what a
+# release actually produces. For that, tick "Re-pull image" alongside polling -
+# otherwise the stack keeps running the digest it first pulled and a release
+# appears to do nothing.
+
+services:
+  inferno:
+    # `alpha` moves with each tagged release. Pin a version instead
+    # (`:0.1.0-alpha.1`) if you would rather updates never be a surprise; the
+    # workflow publishes both, plus `sha-<commit>` for exact reproduction.
+    image: ghcr.io/logie-labs/inferno-app:alpha
+    container_name: inferno-server
+
+    ports:
+      # Loopback by default, because this image ships with no authentication -
+      # see docker/README.md. Publishing on every interface would put an
+      # unauthenticated downloader on whatever network this host can reach, and
+      # Docker's iptables rules bypass a host firewall that would have stopped
+      # it.
+      #
+      # Reaching it from another machine is what the reverse proxy below is
+      # for. If you are running Portainer on a home server and know what you
+      # are doing, `${INFERNO_BIND:-127.0.0.1}` lets you override it in the
+      # stack's environment variables without editing this file.
+      - "${INFERNO_BIND:-127.0.0.1}:${INFERNO_PORT:-8765}:8765"
+
+    environment:
+      # Must be non-empty to mean anything: an empty value falls back to the
+      # service default of "*", which lets any page on the internet drive this
+      # instance from a visitor's browser. Set it to the address people
+      # actually open, scheme and port included.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:8765}
+      DOWNLOAD_DIR: /data/downloads
+      INFERNO_CONFIG_FILE: /data/inferno-settings.json
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-2}
+      # Downloads from a datacenter IP get bot-checked by YouTube far more than
+      # from a home connection. If jobs fail on a VPS but work on your desktop,
+      # set a residential proxy here.
+      # PROXY: http://user:pass@host:port
+
+    volumes:
+      - inferno-data:/data
+
+    restart: unless-stopped
+
+    security_opt:
+      - no-new-privileges:true
+
+    # yt-dlp spawns an ffmpeg per job and neither is bounded by default, so a
+    # queue of large merges can take a small host down. Raise on a bigger box.
+    mem_limit: ${MEM_LIMIT:-2g}
+
+    healthcheck:
+      # Portainer shows this in the stack view, so a container that is up but
+      # not serving is visible without opening logs.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=4).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  inferno-data:

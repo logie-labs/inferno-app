@@ -8,6 +8,7 @@ path — anything they can do, a third-party tool can do the same way (SPEC §1)
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 import re
 import secrets
@@ -19,6 +20,7 @@ from fastapi import Body, Depends, FastAPI, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.websockets import WebSocketDisconnect
 
@@ -304,7 +306,59 @@ def create_app(
 
     _install_error_handlers(application)
     _install_routes(application)
+
+    # Last, and only when this deployment ships a frontend: a mount at "/"
+    # matches anything the routes above did not.
+    web_root = _web_root()
+    if web_root is not None:
+        _install_web_root(application, web_root)
+
     return application
+
+
+def _web_root() -> Path | None:
+    """The built frontend to serve at ``/``, if this deployment ships one.
+
+    Set ``INFERNO_WEB_ROOT`` to the directory holding a built Inferno frontend
+    (``next build`` with ``output: "export"``) and the service serves it
+    alongside the API, on one origin and one port. That is what the container
+    image does.
+
+    Unset — every desktop install, every existing deployment — nothing here
+    changes: the mount is never added and ``/`` keeps serving the bundled test
+    client exactly as before. The variable is the whole opt-in.
+
+    Serving the UI from the API's own origin is not a convenience. It is what
+    lets the browser build skip CORS entirely and send no token: the frontend
+    already resolves its endpoint to ``window.location.origin`` when the Tauri
+    bridge is absent, so same-origin is the configuration it expects.
+    """
+    raw = os.environ.get("INFERNO_WEB_ROOT", "").strip()
+    if not raw:
+        return None
+    root = Path(raw).expanduser()
+    return root if root.is_dir() else None
+
+
+def _install_web_root(application: FastAPI, root: Path) -> None:
+    """Mount the built frontend last, so it can never shadow the API.
+
+    Starlette matches routes in registration order and a mount at ``/`` swallows
+    everything below it, so this has to run after `_install_routes` — which is
+    the only reason it is a separate function rather than another block in the
+    factory. ``/api/v1/...``, ``/health``, ``/docs``, ``/openapi.json`` and the
+    websockets are all registered by then and keep winning; the mount picks up
+    what is left, which is exactly the static bundle (``/_next/...`` and the
+    page itself).
+
+    ``html=True`` gives directory requests their ``index.html``, which is how a
+    statically exported Next route like ``/soundpad-test/`` resolves.
+
+    ``/`` itself is not handled here — `client_page` already owns that exact
+    path and was registered first, so it decides between the bundled test client
+    and this bundle. One route, one decision.
+    """
+    application.mount("/", StaticFiles(directory=root, html=True), name="web")
 
 
 def _install_error_handlers(application: FastAPI) -> None:
@@ -679,7 +733,24 @@ def _install_routes(application: FastAPI) -> None:
 
     @application.get("/", include_in_schema=False)
     @application.get("/client", include_in_schema=False)
-    async def client_page() -> Response:
+    async def client_page(request: Request) -> Response:
+        # A deployment that ships a built frontend serves that at `/` instead.
+        # `/client` still reaches the bundled test client either way, which is
+        # what makes it useful for telling "the API is fine, the UI is broken"
+        # apart from "the service is down" without changing the deployment.
+        root = _web_root()
+        if root is not None and request.url.path == "/":
+            page = root / "index.html"
+            if page.is_file():
+                return FileResponse(
+                    page,
+                    media_type="text/html",
+                    headers={
+                        "cache-control": "no-store, must-revalidate",
+                        "pragma": "no-cache",
+                    },
+                )
+
         page = Path(__file__).resolve().parent / "clients" / "client.html"
         if not page.is_file():  # pragma: no cover - only if the file is missing
             return JSONResponse(

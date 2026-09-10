@@ -1,0 +1,144 @@
+# Builds the server image and publishes it to GHCR.
+#
+# This is what Portainer pulls. A tag push publishes an immutable version tag
+# plus a moving one (`alpha`), and Portainer's "re-pull image" polls the moving
+# tag - so shipping an update is `git tag` and nothing else.
+#
+# Runs on tags and on master. Master builds keep `edge` current without
+# touching what anyone has deployed.
+
+name: docker
+
+on:
+  push:
+    # `experimental` is where this lands first. Pushing it builds and publishes
+    # an `experimental`-tagged image, which is how the Dockerfile gets proven
+    # before a tag is cut - nothing following `alpha` is affected either way.
+    branches: [master, experimental]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Required to push to GHCR with the automatic GITHUB_TOKEN. Without it
+      # the build succeeds and the push 403s at the very last step.
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU + Buildx give us arm64 alongside amd64, which is what makes this
+      # runnable on a Raspberry Pi or an ARM VPS rather than only on x86.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests: a PR from a fork has a read-only token, and
+      # there is nothing to publish from an unmerged change anyway. The build
+      # still runs, so a broken Dockerfile fails the PR.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # v0.1.0-alpha.1 produces: 0.1.0-alpha.1, sha-<commit>, and `alpha`
+          # via the rule below. Deliberately no `latest` - see the raw rules.
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=sha,format=short
+            # The moving tag Portainer follows. Only ever set from a real tag,
+            # so a master push cannot silently redeploy everyone's stack.
+            type=raw,value=alpha,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # `edge` tracks master for anyone who wants it. Nothing follows it
+            # by default.
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in the Actions cache, so an unchanged frontend does not
+          # repeat `npm ci` on every push.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Proves the image starts and answers before anyone deploys it. amd64
+      # only - running the arm64 image here would go through QEMU and is slow
+      # enough to be its own problem.
+      - name: Smoke test the image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          echo "Testing $IMAGE"
+          docker run -d --name smoke -p 8765:8765 "$IMAGE"
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/health > /tmp/health.json; then
+              echo "service answered after ${i}s"
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "::error::service never answered on /health"
+              docker logs smoke
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "--- /health ---"
+          cat /tmp/health.json
+
+          # ffmpeg and ffprobe are what every merge depends on. If the image
+          # ever ships without them, fail here rather than on a user's first
+          # 1080p download.
+          python3 -c "
+          import json, sys
+          h = json.load(open('/tmp/health.json'))
+          # /health reports each binary at the top level as
+          # {path, source, version, available}.
+          missing = [n for n in ('ffmpeg', 'ffprobe')
+                     if not (h.get(n) or {}).get('available')]
+          if missing:
+              print('::error::missing from image: ' + ', '.join(missing))
+              print(json.dumps(h, indent=2))
+              sys.exit(1)
+          print('ffmpeg', h['ffmpeg']['version'], '/ ffprobe ok')
+          # quickjs is optional - the Dockerfile tolerates it being absent -
+          # so report it rather than failing on it.
+          js = h.get('js_runtime') or {}
+          print('js runtime:', js.get('name'), js.get('version')
+                if js.get('available') else '(unavailable - some extractors limited)')
+          "
+
+          # The frontend has to be served, not just built. A 200 with the
+          # served bundle means INFERNO_WEB_ROOT resolved inside the image.
+          curl -fsS http://127.0.0.1:8765/ | head -c 200
+          echo
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs smoke || true

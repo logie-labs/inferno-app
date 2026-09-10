@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation"
 import { Icon, type IconName } from "@/components/icon"
 import { useActiveSection } from "@/components/sections/active-section-context"
 import { sectionLabels } from "@/components/sections/index"
+import { capabilities } from "@/lib/deployment"
 import { tauriWindow } from "@/lib/tauri-window"
 import { cn } from "@/lib/utils"
 import { RiFireLine } from "@remixicon/react"
@@ -56,9 +57,16 @@ function usePageLabel() {
   return pathname.replace(/^\//, "").replace(/[/-]/g, " ")
 }
 
-export function WindowToolbar() {
+/**
+ * Minimise, maximise, close.
+ *
+ * Split out of the toolbar so the container build drops the buttons *and* the
+ * resize subscription behind them. Left inline, the effect would still mount
+ * and still call into `tauriWindow`, which no-ops outside Tauri - harmless, but
+ * it would keep a listener alive for a window that does not exist.
+ */
+function WindowControls() {
   const [isMaximized, setIsMaximized] = useState(false)
-  const label = usePageLabel()
 
   useEffect(() => {
     let mounted = true
@@ -81,6 +89,31 @@ export function WindowToolbar() {
       cleanupResize()
     }
   }, [])
+
+  return (
+    <div className="flex h-full items-stretch">
+      <WindowControlButton
+        label="Minimise"
+        glyph="minimize"
+        onClick={tauriWindow.minimize}
+      />
+      <WindowControlButton
+        label={isMaximized ? "Restore" : "Maximise"}
+        glyph={isMaximized ? "restore" : "maximize"}
+        onClick={tauriWindow.toggleMaximize}
+      />
+      <WindowControlButton
+        label="Close"
+        glyph="close"
+        onClick={tauriWindow.close}
+        danger
+      />
+    </div>
+  )
+}
+
+export function WindowToolbar() {
+  const label = usePageLabel()
 
   return (
     // `relative z-100` keeps the caption above every portalled layer (dialog
@@ -113,24 +146,14 @@ export function WindowToolbar() {
           {label}
         </span>
       </div>
-      <div className="flex h-full items-stretch">
-        <WindowControlButton
-          label="Minimise"
-          glyph="minimize"
-          onClick={tauriWindow.minimize}
-        />
-        <WindowControlButton
-          label={isMaximized ? "Restore" : "Maximise"}
-          glyph={isMaximized ? "restore" : "maximize"}
-          onClick={tauriWindow.toggleMaximize}
-        />
-        <WindowControlButton
-          label="Close"
-          glyph="close"
-          onClick={tauriWindow.close}
-          danger
-        />
-      </div>
+      {/* The right-hand cell.
+
+          In the container there is no OS window to minimise, so the buttons
+          are gone - but the cell stays, and so does the `auto` track that
+          sizes it. An empty `auto` column collapses to nothing, which is why
+          the bar looks right with no content here and will still look right
+          with whatever goes in later. Put it in this div. */}
+      {capabilities.windowControls ? <WindowControls /> : <div />}
     </header>
   )
 }

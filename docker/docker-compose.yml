@@ -1,0 +1,56 @@
+# Inferno server.
+#
+#   cd docker && cp .env.example .env && docker compose up --build
+#
+# Then open http://127.0.0.1:8765 - the UI and the API are the same origin.
+
+services:
+  inferno:
+    build:
+      # The repo root, not this directory: the image builds the frontend from
+      # source, so the context has to contain it.
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: inferno-server:latest
+    container_name: inferno-server
+
+    ports:
+      # Bound to the loopback interface on purpose.
+      #
+      # `- "8765:8765"` - the form most compose files use - publishes on every
+      # interface, and because Docker writes its own iptables rules that
+      # bypasses a host firewall that would otherwise have stopped it. This
+      # image ships with no authentication (see .env.example), so that form
+      # would put an unauthenticated downloader on the public internet.
+      #
+      # Change this only together with putting a reverse proxy in front.
+      - "127.0.0.1:${INFERNO_PORT:-8765}:8765"
+
+    env_file:
+      # Optional so a fresh clone runs without a setup step. The defaults in
+      # this file are the safe ones; .env is where you override them. Needs
+      # Compose v2.24+ - on anything older, `cp .env.example .env` first.
+      - path: .env
+        required: false
+
+    volumes:
+      # Settings and finished downloads. The only thing that must persist.
+      - inferno-data:/data
+
+    restart: unless-stopped
+
+    # yt-dlp spawns ffmpeg per job and neither is bounded by default, so a
+    # queue of large merges can take the host down with it. Tune to the box.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+    # Sensible for anything running code fetched from the internet, and this
+    # image needs none of what it gives up. It still writes to /data, which is
+    # a volume and unaffected by a read-only root filesystem.
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  inferno-data:
