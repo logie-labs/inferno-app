@@ -487,9 +487,14 @@ export function FileBrowserProvider({
 
       return
     }
-    void openFile(client, { url: entry.url, name: entry.name }).catch(
-      (cause: unknown) =>
-        toast.error("Could not open", { description: describeError(cause) })
+    void openFile(client, {
+      url: entry.url,
+      name: entry.name,
+      // Listing entries are already root-relative, which is exactly what the
+      // viewer route is keyed on.
+      relativePath: entry.path,
+    }).catch((cause: unknown) =>
+      toast.error("Could not open", { description: describeError(cause) })
     )
   }
 

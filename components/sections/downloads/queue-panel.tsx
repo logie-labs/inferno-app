@@ -37,7 +37,7 @@ import {
   type JobTracker,
 } from "@/lib/inferno-progress"
 import { capabilities } from "@/lib/deployment"
-import { downloadFile, openFile } from "@/lib/file-actions"
+import { downloadFile, openFile, relativeToRoot } from "@/lib/file-actions"
 import {
   describeError,
   describeErrorBody,
@@ -187,7 +187,7 @@ function QueueRowItem({
   onShowDetails: (video: VideoInfo) => void
   onConfirm: (request: ConfirmRequest) => void
 }) {
-  const { cancel, remove, retry, entryFor, destroy, client } =
+  const { cancel, remove, retry, entryFor, destroy, client, health } =
     useInfernoService()
   const fileBrowser = useFileBrowser()
   const { job } = tracker
@@ -336,6 +336,14 @@ function QueueRowItem({
       // now, not only where it was put.
       path: entry?.file_path ?? primary?.path,
       name: primary?.name,
+      // The job API deals in absolute paths and the viewer route in
+      // root-relative ones, so the root /health reported is what bridges them.
+      // Null when the file sits outside the download folder, and opening then
+      // falls back to the raw URL rather than a /view link that would 404.
+      relativePath: relativeToRoot(
+        primary?.path ?? null,
+        health?.download_dir ?? null
+      ),
     }
 
     file.push({

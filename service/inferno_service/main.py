@@ -359,7 +359,42 @@ def _install_web_root(application: FastAPI, root: Path) -> None:
     ``/`` itself is not handled here — `client_page` already owns that exact
     path and was registered first, so it decides between the bundled test client
     and this bundle. One route, one decision.
+
+    ``/view/...`` is the one path that needs more than static file serving. The
+    frontend has a page there that plays one downloaded file, and the file is
+    named in the URL — so there is a page per file, and a static export can only
+    produce one. This route sends every ``/view/...`` request to that single
+    page, which reads the path from the URL itself.
+
+    Real files under ``/view/`` still win, checked first: the export writes
+    Next's own payloads there (``__next.*``), and swallowing those would break
+    client-side navigation into the page.
     """
+    view_page = root / "view.html"
+
+    if view_page.is_file():
+
+        # Both forms. `/view/{rest:path}` does not match a bare `/view`, and
+        # without this that falls through to the static mount, finds a
+        # directory holding only Next's payload files, and 404s. The page
+        # itself already says "no file was named in the address", which is a
+        # better answer than the server's.
+        @application.get("/view", include_in_schema=False)
+        @application.get("/view/{rest:path}", include_in_schema=False)
+        async def view_file(rest: str = "") -> Response:
+            candidate = (root / "view" / rest).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                return FileResponse(candidate)
+
+            return FileResponse(
+                view_page,
+                media_type="text/html",
+                headers={
+                    "cache-control": "no-store, must-revalidate",
+                    "pragma": "no-cache",
+                },
+            )
+
     application.mount("/", StaticFiles(directory=root, html=True), name="web")
 
 

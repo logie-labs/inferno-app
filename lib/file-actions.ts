@@ -40,10 +40,53 @@ export type FileTarget = {
   path?: string | null
   /** For the browser's download filename, and for error messages. */
   name?: string | null
+  /**
+   * Path relative to the download root, which is what the viewer route is
+   * keyed on (`/view/<relativePath>`).
+   *
+   * Optional because not every caller has it: the browse dialog does - every
+   * listing entry carries one - while the queue holds absolute paths from the
+   * job API and has to subtract the root, which it can only do once `/health`
+   * has reported it. Without one, opening falls back to the raw file URL,
+   * which still works and just skips the player.
+   */
+  relativePath?: string | null
 }
 
 export function targetFromServiceFile(file: ServiceFile): FileTarget {
   return { url: file.url, path: file.path, name: file.name }
+}
+
+/**
+ * An absolute path from the service, expressed relative to the download root.
+ *
+ * Both come from the same service - `files[].path` and `/health`'s
+ * `download_dir` - so this is string arithmetic on two values that already
+ * agree, not a guess. Returns null when they do not agree, which happens when a
+ * download was placed outside the download folder: the viewer cannot address
+ * that file, and callers fall back to the raw URL rather than building a
+ * `/view/` link that would 404.
+ *
+ * Separators are normalised because the service may be running on Windows,
+ * where the paths come back with backslashes and the URL needs forward ones.
+ */
+export function relativeToRoot(
+  absolutePath: string | null | undefined,
+  root: string | null | undefined
+): string | null {
+  if (!absolutePath || !root) {
+    return null
+  }
+
+  const normalise = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "")
+  const file = normalise(absolutePath)
+  const base = normalise(root)
+
+  if (file === base || !file.startsWith(`${base}/`)) {
+    return null
+  }
+
+  return file.slice(base.length + 1)
 }
 
 function notAvailable(what: string): never {
@@ -56,11 +99,19 @@ function notAvailable(what: string): never {
 /**
  * Show the file to the person who asked for it.
  *
- * Desktop: the OS opens it in their default application. Browser: a new tab,
- * where the outcome is the browser's to decide - it plays an mp4 inline and
- * downloads a mkv, based on the content type the API sends. That is the right
- * division: guessing which is playable would only produce a worse answer than
- * the browser's own.
+ * Desktop: the OS opens it in their default application.
+ *
+ * Browser: a new tab on `/view/<path>`, the app's own viewer, rather than the
+ * file URL itself. Handing a browser the raw bytes works for an mp4 and fails
+ * silently for everything else - a `.mkv` is either a download prompt or a
+ * blank frame, with nothing on the page to say which or why. Since yt-dlp
+ * merges to Matroska by default that is the common outcome, not the rare one.
+ * The viewer wraps the same bytes in a player and can explain itself when the
+ * browser has no decoder.
+ *
+ * Falls back to the raw URL when the caller has no root-relative path, which
+ * is the one thing the viewer route needs. Better a tab that behaves like it
+ * used to than an action that does nothing.
  *
  * `noopener,noreferrer` because the opened tab has no business reaching back
  * into this one through `window.opener`.
@@ -68,6 +119,16 @@ function notAvailable(what: string): never {
 export async function openFile(client: InfernoClient | null, file: FileTarget) {
   if (capabilities.localFilesystem) {
     return openPath(file.path ?? "")
+  }
+
+  if (file.relativePath) {
+    const href = `/view/${file.relativePath
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`
+    window.open(href, "_blank", "noopener,noreferrer")
+
+    return
   }
 
   if (!client || !file.url) {
