@@ -134,10 +134,27 @@ jobs:
                 if js.get('available') else '(unavailable - some extractors limited)')
           "
 
-          # The frontend has to be served, not just built. A 200 with the
-          # served bundle means INFERNO_WEB_ROOT resolved inside the image.
-          curl -fsS http://127.0.0.1:8765/ | head -c 200
+          # The frontend has to be served, not just built - INFERNO_WEB_ROOT
+          # resolving inside the image is the whole difference between this and
+          # a bare API container.
+          #
+          # Written to a file rather than piped into `head`: under `pipefail`,
+          # head closing the pipe early makes curl exit 23 and fails the step
+          # on a response that was perfectly fine.
+          curl -fsS http://127.0.0.1:8765/ -o /tmp/index.html
+          head -c 200 /tmp/index.html
           echo
+
+          # And it must be the built bundle, not the service's fallback test
+          # client - which also answers 200 at /, so a status check alone would
+          # pass with the frontend missing entirely.
+          if grep -q "/_next/" /tmp/index.html; then
+            echo "served the built frontend"
+          else
+            echo "::error::/ served something without /_next/ references - \
+          INFERNO_WEB_ROOT did not resolve and this is the fallback client"
+            exit 1
+          fi
 
       - name: Container logs on failure
         if: failure()
