@@ -38,7 +38,29 @@ WORKDIR /build
 # far less often than the source does, so an edit to a component reuses the
 # install instead of repeating it.
 COPY package.json package-lock.json ./
-RUN npm ci
+
+# `npm install`, not `npm ci`, and not by preference.
+#
+# The lockfile was generated on Windows, so it records only the optional
+# dependencies npm resolves *there*. On Linux npm additionally wants the wasm32
+# fallbacks - `@tailwindcss/oxide-wasm32-wasi` and `@img/sharp-wasm32` - and
+# their transitive `@emnapi/core` and `@emnapi/runtime`, which are absent. That
+# is not a warning: `npm ci` refuses outright with EUSAGE, "can only install
+# packages when your package.json and package-lock.json are in sync".
+#
+# Neither obvious fix is right yet. Regenerating the lockfile from scratch on
+# Linux does add them, but it also moves 118 other packages - including a
+# `@base-ui/react` minor and a `@hono/node-server` major - which is not a change
+# to make inside a Docker fix, untested against the desktop app. Hand-merging
+# the four missing entries is fragile: the versions differ between the hoisted
+# and nested positions, and a lockfile that is subtly wrong fails later and
+# less legibly than one that is obviously wrong.
+#
+# So this resolves within the lockfile's semver ranges at build time. The cost
+# is real - two builds of the same commit can differ - and the fix is to
+# regenerate the lockfile on Linux, verify the desktop app against it, commit
+# it, and change this line back to `npm ci`.
+RUN npm install --no-audit --no-fund
 
 COPY . .
 
