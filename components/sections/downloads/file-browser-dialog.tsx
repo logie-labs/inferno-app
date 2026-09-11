@@ -16,13 +16,15 @@ import {
   RiArrowDownSLine,
   RiArrowRightSLine,
   RiArrowUpLine,
+  RiDeleteBinLine,
   RiDownload2Line,
   RiEditLine,
   RiExternalLinkLine,
   RiFileLine,
   RiFileTextLine,
-  RiFolder3Fill,
   RiFolder3Line,
+  RiFolderAddLine,
+  RiFolderOpenLine,
   RiHome3Line,
   RiImageLine,
   RiInformationLine,
@@ -44,6 +46,13 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 import { Button } from "@/components/ui/button"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu"
 import {
   Dialog,
   DialogContent,
@@ -244,8 +253,11 @@ function TreeBranch({
             <RiArrowRightSLine className="size-3" />
           )}
         </button>
+        {/* An open folder for an expanded branch, a closed one otherwise -
+            the chevron says the same thing, and the icon agreeing with it is
+            what makes a deep tree readable at a glance. */}
         {isOpen ? (
-          <RiFolder3Fill aria-hidden className="size-3.5 shrink-0" />
+          <RiFolderOpenLine aria-hidden className="size-3.5 shrink-0" />
         ) : (
           <RiFolder3Line aria-hidden className="size-3.5 shrink-0" />
         )}
@@ -662,42 +674,55 @@ export function FileBrowserProvider({
       return
     }
 
+    const surface = contentRef.current
+    if (!surface) {
+      return
+    }
+
     const additive = event.ctrlKey || event.metaKey || event.shiftKey
     const base = additive ? new Set(selection) : new Set<string>()
     if (!additive) {
       setSelection(base)
     }
 
-    const origin = { x: event.clientX, y: event.clientY }
+    /** Client coordinates, expressed against the drag surface. */
+    const toSurface = (clientX: number, clientY: number) => {
+      const bounds = surface.getBoundingClientRect()
+
+      return { x: clientX - bounds.left, y: clientY - bounds.top }
+    }
+
+    const origin = toSurface(event.clientX, event.clientY)
     setMarquee({ x1: origin.x, y1: origin.y, x2: origin.x, y2: origin.y })
 
     const onMove = (move: MouseEvent) => {
-      setMarquee({
-        x1: origin.x,
-        y1: origin.y,
-        x2: move.clientX,
-        y2: move.clientY,
-      })
+      const current = toSurface(move.clientX, move.clientY)
+      setMarquee({ x1: origin.x, y1: origin.y, x2: current.x, y2: current.y })
 
       const box = {
-        left: Math.min(origin.x, move.clientX),
-        right: Math.max(origin.x, move.clientX),
-        top: Math.min(origin.y, move.clientY),
-        bottom: Math.max(origin.y, move.clientY),
+        left: Math.min(origin.x, current.x),
+        right: Math.max(origin.x, current.x),
+        top: Math.min(origin.y, current.y),
+        bottom: Math.max(origin.y, current.y),
       }
 
+      // Rows are measured into the same space, so the comparison holds however
+      // far the list has scrolled since the drag began.
+      const bounds = surface.getBoundingClientRect()
       const hit = new Set(base)
-      for (const node of contentRef.current?.querySelectorAll<HTMLElement>(
+      for (const node of surface.querySelectorAll<HTMLElement>(
         "[data-entry-path]"
-      ) ?? []) {
+      )) {
         const rect = node.getBoundingClientRect()
+        const left = rect.left - bounds.left
+        const top = rect.top - bounds.top
         // Touching counts, the way it does in Explorer - a box has to cover
         // part of a row, not all of it.
         const overlaps =
-          rect.left < box.right &&
-          rect.right > box.left &&
-          rect.top < box.bottom &&
-          rect.bottom > box.top
+          left < box.right &&
+          left + rect.width > box.left &&
+          top < box.bottom &&
+          top + rect.height > box.top
         if (overlaps) {
           const path = node.dataset.entryPath
           if (path) {
@@ -745,6 +770,100 @@ export function FileBrowserProvider({
       (cause: unknown) =>
         toast.error("Could not download", { description: describeError(cause) })
     )
+
+  /**
+   * Re-list the folder after something in it changed.
+   *
+   * The listing is the source of truth for both panes, so refetching is both
+   * the update and the confirmation - no local patching of a list that the
+   * server has already moved on from.
+   */
+  const refresh = async () => {
+    if (!client || !state) {
+      return
+    }
+    const next = await client.listFiles(state.path)
+    setListing(next)
+    setChildrenByPath((prior) => ({
+      ...prior,
+      [next.path]: next.entries.filter((e) => e.type === "directory"),
+    }))
+  }
+
+  /** Everything currently selected, as entries rather than paths. */
+  const selectedEntries = visible.filter((entry) => selection.has(entry.path))
+
+  const runFileAction = async (what: string, action: () => Promise<unknown>) => {
+    try {
+      await action()
+      await refresh()
+    } catch (cause) {
+      toast.error(`Could not ${what}`, { description: describeError(cause) })
+    }
+  }
+
+  const createFolder = () => {
+    const name = window.prompt("New folder name")
+    if (!name || !client) {
+      return
+    }
+    void runFileAction("create the folder", () =>
+      client.createFolder(listing?.path ?? "", name)
+    )
+  }
+
+  const renameEntry = (entry: FileEntry) => {
+    const name = window.prompt("Rename to", entry.name)
+    if (!name || name === entry.name || !client) {
+      return
+    }
+    void runFileAction("rename", () => client.renameFile(entry.path, name))
+  }
+
+  /**
+   * Delete, on the whole selection when the clicked row is part of it.
+   *
+   * That is what every file manager does, and the alternative - deleting only
+   * the row under the cursor while five others sit highlighted - is how people
+   * lose files they meant to keep.
+   */
+  const deleteEntries = (entry: FileEntry) => {
+    const targets = selection.has(entry.path) ? selectedEntries : [entry]
+    const what =
+      targets.length === 1
+        ? `"${targets[0].name}"`
+        : `${targets.length} items`
+    if (
+      !client ||
+      !window.confirm(
+        `Delete ${what}? This removes it from the server and cannot be undone.`
+      )
+    ) {
+      return
+    }
+    void runFileAction("delete", async () => {
+      for (const target of targets) {
+        await client.deleteFile(target.path)
+      }
+      setSelection(new Set())
+    })
+  }
+
+  /** The same menu for a card and for a table row. */
+  const menuFor = (entry: FileEntry, node: React.ReactElement) => (
+    <EntryMenu
+      entry={entry}
+      selectionSize={selection.size}
+      onOpen={() => openEntry(entry)}
+      onDownload={() => download(entry)}
+      onReveal={() => navigate(entry.path, null)}
+      onRename={() => renameEntry(entry)}
+      onDelete={() => deleteEntries(entry)}
+      onNewFolder={createFolder}
+    >
+      {node}
+    </EntryMenu>
+  )
 
   const sortBy = (key: SortKey) =>
     setSort((prior) => ({
@@ -799,17 +918,25 @@ export function FileBrowserProvider({
                 <RiArrowUpLine className="size-3.5" />
               </Button>
 
+              {/* One control that is a path and a text field at once, rather
+                  than two with a button to swap between them. Clicking a
+                  segment navigates; clicking the space beside them turns the
+                  whole bar into an input holding the same path, which is the
+                  gesture every browser address bar already trains people in.
+                  Styled as the field it becomes, so nothing moves when it
+                  does. */}
+              <div
+                className={cn(
+                  "flex h-8 min-w-0 flex-1 items-center border border-transparent border-b-input px-2 transition-colors",
+                  editingPath && "border-b-ring"
+                )}
+              >
               {editingPath ? (
-                /* The typed form of the same bar. Every file manager has one
-                   behind Ctrl+L, because pasting a path beats clicking down to
-                   it - and this one is the only way to reach a folder whose
-                   name you know but whose parent is a long way up. */
                 <form
-                  className="flex min-w-0 flex-1 items-center gap-2"
+                  className="flex min-w-0 flex-1 items-center"
                   onSubmit={(event) => {
                     event.preventDefault()
                     navigate(draftPath.trim(), null)
-                    setEditingPath(false)
                   }}
                 >
                   <Input
@@ -819,23 +946,26 @@ export function FileBrowserProvider({
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
                         event.preventDefault()
+                        // Kept off the dialog's own Escape handling, which
+                        // would otherwise clear the selection behind this.
+                        event.stopPropagation()
                         setEditingPath(false)
                       }
                     }}
+                    // Clicking away goes back to the crumbs having applied
+                    // nothing - the path is still whatever it was.
+                    onBlur={() => setEditingPath(false)}
                     aria-label="Path"
                     placeholder="downloads/…"
-                    className="h-8 font-mono text-[11px]"
+                    className="h-7 border-0 font-mono text-[11px]"
                   />
-                  <Button type="submit" variant="outline" size="sm">
-                    Go
-                  </Button>
                 </form>
               ) : (
-                <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
+                <Breadcrumb className="min-w-0 shrink overflow-hidden">
                   <BreadcrumbList className="flex-nowrap gap-1 font-mono text-[10px] tracking-[0.08em] sm:gap-1.5">
                     <BreadcrumbItem className="shrink-0">
                       {crumbs.length === 0 ? (
-                        <BreadcrumbPage className="flex items-center gap-1">
+                        <BreadcrumbPage className="flex items-center gap-1 uppercase">
                           <RiHome3Line className="size-3" />
                           downloads
                         </BreadcrumbPage>
@@ -845,7 +975,13 @@ export function FileBrowserProvider({
                             <button
                               type="button"
                               onClick={() => navigate("", null)}
-                              className="flex items-center gap-1"
+                              // `uppercase` on each crumb rather than once on
+                              // the list. text-transform does inherit - but the
+                              // UA stylesheet sets `text-transform: none` on
+                              // buttons, which is exactly why the root read
+                              // DOWNLOADS as a span and downloads the moment
+                              // entering a folder turned it into a link.
+                              className="flex items-center gap-1 uppercase"
                             />
                           }
                         >
@@ -884,16 +1020,16 @@ export function FileBrowserProvider({
                           <BreadcrumbSeparator className="shrink-0" />
                           <BreadcrumbItem className="min-w-0">
                             {index === shown.length - 1 ? (
-                              <BreadcrumbPage className="truncate">
+                              <BreadcrumbPage className="truncate uppercase">
                                 {crumb.name}
                               </BreadcrumbPage>
                             ) : (
                               <BreadcrumbLink
-                                className="truncate"
                                 render={
                                   <button
                                     type="button"
                                     onClick={() => navigate(crumb.path, null)}
+                                    className="truncate uppercase"
                                   />
                                 }
                               >
@@ -908,22 +1044,19 @@ export function FileBrowserProvider({
                 </Breadcrumb>
               )}
 
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title={editingPath ? "Show breadcrumbs" : "Type a path (Ctrl+L)"}
-                aria-label={
-                  editingPath ? "Show breadcrumbs" : "Type a path"
-                }
-                aria-pressed={editingPath}
-                onClick={() =>
-                  editingPath ? setEditingPath(false) : startEditingPath()
-                }
-                className={cn("shrink-0", editingPath && "text-foreground")}
-              >
-                <RiEditLine className="size-3.5" />
-              </Button>
+              {/* The rest of the bar. Clicking here is what turns it into the
+                  field - the same dead space an address bar gives you, and the
+                  reason there is no button to go and find. */}
+              {editingPath ? null : (
+                <button
+                  type="button"
+                  aria-label="Edit path"
+                  title="Edit path (Ctrl+L)"
+                  onClick={startEditingPath}
+                  className="h-full min-w-8 flex-1 cursor-text"
+                />
+              )}
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
@@ -1043,6 +1176,16 @@ export function FileBrowserProvider({
                     still gives you somewhere to start a box, and `relative`
                     only to establish a containing block - the box itself is
                     fixed, and positioned in viewport coordinates. */}
+                <EntryMenu
+                  entry={null}
+                  selectionSize={selection.size}
+                  onOpen={() => {}}
+                  onDownload={() => {}}
+                  onReveal={() => {}}
+                  onRename={() => {}}
+                  onDelete={() => {}}
+                  onNewFolder={createFolder}
+                >
                 <div
                   ref={contentRef}
                   onMouseDown={startMarquee}
@@ -1066,7 +1209,8 @@ export function FileBrowserProvider({
                       const Icon = iconFor(entry)
                       const active = selection.has(entry.path)
 
-                      return (
+                      return menuFor(
+                        entry,
                         <button
                           key={entry.path}
                           type="button"
@@ -1138,7 +1282,8 @@ export function FileBrowserProvider({
                         const Icon = iconFor(entry)
                         const active = selection.has(entry.path)
 
-                        return (
+                        return menuFor(
+                          entry,
                           <tr
                             key={entry.path}
                             data-entry-path={entry.path}
@@ -1211,14 +1356,14 @@ export function FileBrowserProvider({
                     </tbody>
                   </table>
                 )}
-                </div>
-              </ScrollArea>
 
-              {/* The selection box. Clamped to the content pane so dragging
-                  past its edge does not paint over the tree or the details
-                  panel, and `pointer-events-none` so it never becomes the
-                  target of its own drag. */}
-              {marquee ? <MarqueeBox rect={marquee} within={contentRef} /> : null}
+                  {/* Inside the surface its coordinates are measured against,
+                      so it scrolls with the list and is clipped by the pane
+                      instead of being clamped to it by hand. */}
+                  {marquee ? <MarqueeBox rect={marquee} /> : null}
+                </div>
+                </EntryMenu>
+              </ScrollArea>
 
               {/* The count, and the one thing worth stating plainly about a
                   file manager with no delete button. */}
@@ -1337,40 +1482,123 @@ export function FileBrowserProvider({
 }
 
 /**
- * The drag rectangle.
+ * The right-click menu on a row, and on the empty space around them.
  *
- * Fixed-positioned in viewport coordinates, which is what lets the hit test use
- * `getBoundingClientRect` directly and keeps a list that scrolls mid-drag
- * correct with no arithmetic of its own. Clamped to the pane it belongs to, so
- * dragging past an edge does not paint across the tree or the details panel.
+ * Split by what you clicked, the way a real file manager is: a folder offers
+ * to open, rename or delete itself, a file adds viewing and downloading, and
+ * the background offers only the things that belong to the folder you are in.
+ *
+ * Delete is last and separated, because it is the only entry here that
+ * destroys something.
+ */
+function EntryMenu({
+  entry,
+  selectionSize,
+  onOpen,
+  onDownload,
+  onReveal,
+  onRename,
+  onDelete,
+  onNewFolder,
+  children,
+}: {
+  entry: FileEntry | null
+  selectionSize: number
+  onOpen: () => void
+  onDownload: () => void
+  onReveal: () => void
+  onRename: () => void
+  onDelete: () => void
+  onNewFolder: () => void
+  children: React.ReactElement
+}) {
+  const many = entry !== null && selectionSize > 1
+  const deleteLabel = many ? `Delete ${selectionSize} items` : "Delete"
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger render={children} />
+      <ContextMenuContent className="w-56">
+        {entry === null ? (
+          <ContextMenuItem onClick={onNewFolder}>
+            <RiFolderAddLine className="size-3.5" />
+            New folder
+          </ContextMenuItem>
+        ) : entry.type === "directory" ? (
+          <>
+            <ContextMenuItem onClick={onReveal}>
+              <RiFolderOpenLine className="size-3.5" />
+              Open
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onNewFolder}>
+              <RiFolderAddLine className="size-3.5" />
+              New folder
+            </ContextMenuItem>
+            <ContextMenuItem onClick={onRename} disabled={many}>
+              <RiEditLine className="size-3.5" />
+              Rename
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onDelete} variant="destructive">
+              <RiDeleteBinLine className="size-3.5" />
+              {deleteLabel}
+            </ContextMenuItem>
+          </>
+        ) : (
+          <>
+            <ContextMenuItem onClick={onOpen}>
+              <RiExternalLinkLine className="size-3.5" />
+              Open in a new tab
+            </ContextMenuItem>
+            <ContextMenuItem onClick={onDownload}>
+              <RiDownload2Line className="size-3.5" />
+              Download
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onRename} disabled={many}>
+              <RiEditLine className="size-3.5" />
+              Rename
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onDelete} variant="destructive">
+              <RiDeleteBinLine className="size-3.5" />
+              {deleteLabel}
+            </ContextMenuItem>
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+/**
+ * The drag rectangle, laid out inside the scrolling content.
+ *
+ * `absolute`, not `fixed`, and this is the whole of why the first version drew
+ * the box a long way from the cursor: the dialog centres itself with a
+ * `translate`, and a transformed ancestor becomes the containing block for any
+ * fixed descendant. So a fixed box here was positioned against the dialog
+ * rather than the viewport, offset by however far the dialog sits from the
+ * top-left of the screen.
+ *
+ * Absolute inside the surface it is measured from has no such problem, and
+ * scrolls with the list for free.
  */
 function MarqueeBox({
   rect,
-  within,
 }: {
   rect: { x1: number; y1: number; x2: number; y2: number }
-  within: React.RefObject<HTMLDivElement | null>
 }) {
-  const bounds = within.current?.getBoundingClientRect()
-  const left = Math.min(rect.x1, rect.x2)
-  const top = Math.min(rect.y1, rect.y2)
-  const right = Math.max(rect.x1, rect.x2)
-  const bottom = Math.max(rect.y1, rect.y2)
-
-  const clampedLeft = bounds ? Math.max(left, bounds.left) : left
-  const clampedTop = bounds ? Math.max(top, bounds.top) : top
-  const clampedRight = bounds ? Math.min(right, bounds.right) : right
-  const clampedBottom = bounds ? Math.min(bottom, bounds.bottom) : bottom
-
   return (
     <div
       aria-hidden
-      className="pointer-events-none fixed z-50 border border-primary bg-primary/20"
+      className="pointer-events-none absolute z-30 border border-primary bg-primary/20"
       style={{
-        left: clampedLeft,
-        top: clampedTop,
-        width: Math.max(0, clampedRight - clampedLeft),
-        height: Math.max(0, clampedBottom - clampedTop),
+        left: Math.min(rect.x1, rect.x2),
+        top: Math.min(rect.y1, rect.y2),
+        width: Math.abs(rect.x2 - rect.x1),
+        height: Math.abs(rect.y2 - rect.y1),
       }}
     />
   )

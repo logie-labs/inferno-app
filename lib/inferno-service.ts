@@ -84,6 +84,15 @@ export type ServiceFile = {
   url: string
   /** Absolute local path, for opening or revealing. Bytes come from `url`. */
   path?: string | null
+  /**
+   * Whether the file is still on disk, checked as the job is reported.
+   *
+   * The desktop can stat a path itself; a browser cannot, so without this the
+   * queue offers Open and Download for something deleted from the server and
+   * only the click finds out. Undefined from a service too old to report it,
+   * which is why callers test `=== false` rather than falsiness.
+   */
+  exists?: boolean
 }
 
 /** One row in a directory listing from `/api/v1/files`. */
@@ -817,6 +826,33 @@ export class InfernoClient {
     const query = new URLSearchParams({ path })
 
     return this.request<FileListing>(`/api/v1/files?${query}`)
+  }
+
+  /**
+   * The three writes the browse API supports, and all it supports.
+   *
+   * No copy, no move between folders, no upload - each is a larger feature
+   * with its own failure modes. These are what makes the browser a file
+   * manager rather than a viewer.
+   */
+  createFolder(path: string, name: string) {
+    return this.request<FileEntry>("/api/v1/files/folder", {
+      method: "POST",
+      body: JSON.stringify({ path, name }),
+    })
+  }
+
+  renameFile(path: string, name: string) {
+    return this.request<FileEntry>("/api/v1/files/rename", {
+      method: "POST",
+      body: JSON.stringify({ path, name }),
+    })
+  }
+
+  deleteFile(path: string) {
+    const query = new URLSearchParams({ path })
+
+    return this.request<null>(`/api/v1/files?${query}`, { method: "DELETE" })
   }
 }
 

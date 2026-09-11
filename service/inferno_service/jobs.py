@@ -147,6 +147,21 @@ def _slim_video(video: dict[str, Any] | None) -> dict[str, Any] | None:
     return {k: v for k, v in video.items() if k not in _UNPERSISTED_VIDEO_FIELDS}
 
 
+def _still_there(path: str | None) -> bool:
+    """Is the file the job recorded still on disk?
+
+    Null-safe and never raises: a permission error or a path that has become
+    nonsense is, for the client's purposes, the same answer as gone, and a
+    listing should not fail over one entry.
+    """
+    if not path:
+        return False
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
 def _describe_file(job_id: str, path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {
@@ -235,7 +250,19 @@ class Job:
             "video": self.video,
             "playlist": self.playlist,
             "progress": self.progress,
-            "files": list(self.files),
+            # Each file is checked as it is reported, rather than trusting the
+            # list recorded when the job finished.
+            #
+            # A desktop client can stat the path itself and does; a browser
+            # cannot, so without this the queue happily offers Open and
+            # Download for a file somebody deleted from the server ten minutes
+            # ago, and only the click finds out. `files` is a handful of entries
+            # per job and this is called on list, get and snapshot - never on a
+            # progress tick - so the cost is a stat per file per read.
+            "files": [
+                {**entry, "exists": _still_there(entry.get("path"))}
+                for entry in self.files
+            ],
             "error": self.error,
             "created_at": self.created_at,
             "started_at": self.started_at,

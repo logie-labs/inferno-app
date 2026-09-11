@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import secrets
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Literal
@@ -899,6 +900,136 @@ def _install_routes(application: FastAPI) -> None:
                 ErrorCode.FILE_NOT_FOUND, "No such file.", detail={"path": path}
             )
         return _serve_file(target, request, mimetypes.guess_type(target.name)[0])
+
+    # --- changing what is in the download folder ---------------------------
+    #
+    # The browse endpoints above only read. These three are what a file manager
+    # needs to be one rather than a viewer, and they are deliberately the whole
+    # set: make a folder, rename something, remove something. No copy, no move
+    # between folders, no upload - each of those is a larger feature with its
+    # own failure modes, and none was asked for.
+    #
+    # Every path goes through `_resolve_browse_path`, so the bounds are the same
+    # ones the listing has: inside the download folder, symlinks resolved before
+    # the check. A name is a single segment and is checked for separators, so
+    # "../../etc" cannot arrive as a *name* and escape that way either.
+    #
+    # Worth being plain about: deleting a file here does not tell the job that
+    # produced it. The queue keeps its entry and the file stops existing, which
+    # is the same state as someone deleting it from the host - `exists` on the
+    # job's files is what reports it.
+
+    def _safe_name(name: str) -> str:
+        cleaned = name.strip().strip("/")
+        if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned:
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "A name cannot be empty or contain a path separator.",
+                detail={"name": name},
+            )
+        return cleaned
+
+    @application.post(
+        "/api/v1/files/folder",
+        dependencies=guarded,
+        responses=_ERROR_RESPONSES,
+        tags=["files"],
+        summary="Create a folder inside the download folder",
+        status_code=201,
+    )
+    async def create_folder(
+        request: Request,
+        payload: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        ctx = _context(request)
+        parent = _resolve_browse_path(ctx, str(payload.get("path") or ""))
+        name = _safe_name(str(payload.get("name") or ""))
+        target = parent / name
+        if target.exists():
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "Something with that name is already here.",
+                detail={"name": name},
+            )
+        try:
+            target.mkdir(parents=True)
+        except OSError as error:
+            raise ServiceError(
+                ErrorCode.DISK_ERROR, f"Could not create the folder: {error}"
+            ) from error
+
+        root = ctx.settings.resolved_download_dir()
+        return _browse_entry(root, target)
+
+    @application.post(
+        "/api/v1/files/rename",
+        dependencies=guarded,
+        responses=_ERROR_RESPONSES,
+        tags=["files"],
+        summary="Rename a file or folder",
+    )
+    async def rename_entry(
+        request: Request,
+        payload: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        ctx = _context(request)
+        target = _resolve_browse_path(ctx, str(payload.get("path") or ""))
+        root = ctx.settings.resolved_download_dir()
+        if target == root:
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST, "The download folder cannot be renamed."
+            )
+        if not target.exists():
+            raise ServiceError(ErrorCode.FILE_NOT_FOUND, "That is not here any more.")
+
+        destination = target.parent / _safe_name(str(payload.get("name") or ""))
+        if destination != target and destination.exists():
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "Something with that name is already here.",
+                detail={"name": destination.name},
+            )
+        try:
+            target.rename(destination)
+        except OSError as error:
+            raise ServiceError(
+                ErrorCode.DISK_ERROR, f"Could not rename: {error}"
+            ) from error
+
+        return _browse_entry(root, destination)
+
+    @application.delete(
+        "/api/v1/files",
+        dependencies=guarded,
+        responses=_ERROR_RESPONSES,
+        tags=["files"],
+        summary="Delete a file or folder",
+        status_code=204,
+    )
+    async def delete_entry(request: Request, path: str = Query(...)) -> Response:
+        ctx = _context(request)
+        target = _resolve_browse_path(ctx, path)
+        root = ctx.settings.resolved_download_dir()
+        # The bounds check permits the root itself, which is right for listing
+        # and catastrophic here.
+        if target == root:
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST, "The download folder cannot be deleted."
+            )
+        if not target.exists():
+            raise ServiceError(ErrorCode.FILE_NOT_FOUND, "That is not here any more.")
+
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except OSError as error:
+            raise ServiceError(
+                ErrorCode.DISK_ERROR, f"Could not delete: {error}"
+            ) from error
+
+        return Response(status_code=204)
 
     # --- the minimal test client (an ordinary API consumer) ----------------
 

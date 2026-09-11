@@ -222,7 +222,19 @@ function QueueRowItem({
   // put. Prefer the library once it has a record, so a relocated file opens
   // from its new home.
   const location = entry?.file_path ?? primary?.path ?? job.directory ?? null
-  const missing = entry?.state === "missing"
+  /**
+   * The file the row points at is not there any more.
+   *
+   * Two sources, because the two products learn it differently. The desktop
+   * has the library, which stats the path and records the answer. A browser
+   * cannot stat anything, so the service reports `exists` per file as it
+   * lists a job - without it the container offered Open and Download for a
+   * file deleted from the server, and only the click found out.
+   *
+   * `=== false` rather than falsiness: a service too old to report the field
+   * leaves it undefined, which is not the same claim as "gone".
+   */
+  const missing = entry?.state === "missing" || primary?.exists === false
 
   /**
    * Re-check the file before acting on it, rather than polling. Opening this
@@ -329,7 +341,7 @@ function QueueRowItem({
     })
   }
 
-  if (done && location) {
+  if (done && location && !missing) {
     const target = {
       url: primary?.url,
       // The library's path wins where it has one: it knows where the file is
