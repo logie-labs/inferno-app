@@ -306,7 +306,42 @@ export function FileBrowserProvider({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [selected, setSelected] = useState<FileEntry | null>(null)
+  /**
+   * What is selected, by path.
+   *
+   * A set rather than one entry because dragging a box over six files has to
+   * mean six files. The details panel still wants a single entry, which is
+   * derived below - it is the interesting case only when exactly one thing is
+   * selected.
+   */
+  const [selection, setSelection] = useState<Set<string>>(new Set())
+  /** Where a shift-click range starts. Windows keeps this across clicks. */
+  const [anchor, setAnchor] = useState<string | null>(null)
+  /**
+   * The drag rectangle, in viewport coordinates.
+   *
+   * Viewport rather than container-relative on purpose: hit-testing compares
+   * against `getBoundingClientRect`, which is also viewport-based, so a list
+   * that scrolls mid-drag needs no correction. The box is drawn `fixed` for
+   * the same reason and clamped to the content pane, so it never paints over
+   * the tree or the details panel.
+   */
+  const [marquee, setMarquee] = useState<{
+    x1: number
+    y1: number
+    x2: number
+    y2: number
+  } | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  /**
+   * What the key handler reads, rather than what it depends on.
+   *
+   * `visible` changes on every keystroke in the search box and `selection` on
+   * every click; depending on either would tear down and rebind the listener
+   * constantly for no behavioural gain.
+   */
+  const selectionRef = useRef(selection)
+  const visibleRef = useRef<FileEntry[]>([])
   const [view, setView] = useState<ViewMode>("cards")
   const [showDetails, setShowDetails] = useState(true)
   const [query, setQuery] = useState("")
@@ -344,7 +379,8 @@ export function FileBrowserProvider({
     setState({ path, highlight })
     setEditingPath(false)
     setDraftPath("")
-    setSelected(null)
+    setSelection(new Set())
+    setAnchor(null)
     setQuery("")
     setLoading(true)
     setError(null)
@@ -382,9 +418,13 @@ export function FileBrowserProvider({
           [next.path]: next.entries.filter((e) => e.type === "directory"),
         }))
         if (state.highlight) {
-          setSelected(
-            next.entries.find((entry) => entry.name === state.highlight) ?? null
+          const found = next.entries.find(
+            (entry) => entry.name === state.highlight
           )
+          if (found) {
+            setSelection(new Set([found.path]))
+            setAnchor(found.path)
+          }
         }
       })
       .catch((cause: unknown) => {
@@ -461,7 +501,8 @@ export function FileBrowserProvider({
       setState(null)
       setListing(null)
       setError(null)
-      setSelected(null)
+      setSelection(new Set())
+      setAnchor(null)
       setQuery("")
       setEditingPath(false)
       setDraftPath("")
@@ -476,7 +517,22 @@ export function FileBrowserProvider({
     }
 
     function onKeyDown(event: KeyboardEvent) {
+      // Escape clears the selection before it closes anything, which is what
+      // a file manager does and what makes a mis-drag cheap to undo.
+      if (event.key === "Escape" && selectionRef.current.size > 0) {
+        event.preventDefault()
+        event.stopPropagation()
+        setSelection(new Set())
+
+        return
+      }
       if (!event.ctrlKey && !event.metaKey) {
+        return
+      }
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault()
+        setSelection(new Set(visibleRef.current.map((entry) => entry.path)))
+
         return
       }
       const key = event.key.toLowerCase()
@@ -523,6 +579,144 @@ export function FileBrowserProvider({
       return a.name.localeCompare(b.name) * direction
     })
   }, [listing, query, sort])
+
+  // Kept current for the key handler, which reads them instead of depending on
+  // them. Written in an effect rather than during render: a ref assignment in
+  // the render body runs on every pass, including ones React throws away.
+  useEffect(() => {
+    selectionRef.current = selection
+    visibleRef.current = visible
+  }, [selection, visible])
+
+
+  /**
+   * One entry, only when it is the only one.
+   *
+   * The details panel describes a file; with six selected there is no file to
+   * describe, so it shows a count instead and this is null.
+   */
+  const selected =
+    selection.size === 1
+      ? (visible.find((entry) => selection.has(entry.path)) ?? null)
+      : null
+
+  /**
+   * Click, with the modifiers every file manager honours.
+   *
+   * Ctrl toggles one, shift takes the range from the anchor, and a plain click
+   * replaces the selection. The anchor moves on every click except a shift one,
+   * which is what makes shift-clicking twice extend from the same origin rather
+   * than from wherever you last landed.
+   */
+  const selectEntry = (entry: FileEntry, event: React.MouseEvent) => {
+    if (event.ctrlKey || event.metaKey) {
+      setSelection((prior) => {
+        const next = new Set(prior)
+        if (next.has(entry.path)) {
+          next.delete(entry.path)
+        } else {
+          next.add(entry.path)
+        }
+
+        return next
+      })
+      setAnchor(entry.path)
+
+      return
+    }
+
+    if (event.shiftKey && anchor) {
+      const from = visible.findIndex((candidate) => candidate.path === anchor)
+      const to = visible.findIndex((candidate) => candidate.path === entry.path)
+      if (from !== -1 && to !== -1) {
+        const [start, end] = from < to ? [from, to] : [to, from]
+        setSelection(
+          new Set(visible.slice(start, end + 1).map((candidate) => candidate.path))
+        )
+
+        return
+      }
+    }
+
+    setSelection(new Set([entry.path]))
+    setAnchor(entry.path)
+  }
+
+  /**
+   * Drag a box over the list, as Explorer and Finder do.
+   *
+   * Started only on the background of the content pane, never on a row - a
+   * drag that begins on an item is that item being clicked, and swallowing it
+   * would break selecting anything. The `button` check keeps a right-click
+   * from starting one.
+   *
+   * Held on `window` rather than the pane so releasing the mouse outside the
+   * dialog still ends the drag, instead of leaving a box stuck to the cursor.
+   */
+  const startMarquee = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return
+    }
+    const target = event.target as HTMLElement
+    if (target.closest("[data-entry-path]")) {
+      return
+    }
+
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey
+    const base = additive ? new Set(selection) : new Set<string>()
+    if (!additive) {
+      setSelection(base)
+    }
+
+    const origin = { x: event.clientX, y: event.clientY }
+    setMarquee({ x1: origin.x, y1: origin.y, x2: origin.x, y2: origin.y })
+
+    const onMove = (move: MouseEvent) => {
+      setMarquee({
+        x1: origin.x,
+        y1: origin.y,
+        x2: move.clientX,
+        y2: move.clientY,
+      })
+
+      const box = {
+        left: Math.min(origin.x, move.clientX),
+        right: Math.max(origin.x, move.clientX),
+        top: Math.min(origin.y, move.clientY),
+        bottom: Math.max(origin.y, move.clientY),
+      }
+
+      const hit = new Set(base)
+      for (const node of contentRef.current?.querySelectorAll<HTMLElement>(
+        "[data-entry-path]"
+      ) ?? []) {
+        const rect = node.getBoundingClientRect()
+        // Touching counts, the way it does in Explorer - a box has to cover
+        // part of a row, not all of it.
+        const overlaps =
+          rect.left < box.right &&
+          rect.right > box.left &&
+          rect.top < box.bottom &&
+          rect.bottom > box.top
+        if (overlaps) {
+          const path = node.dataset.entryPath
+          if (path) {
+            hit.add(path)
+          }
+        }
+      }
+      setSelection(hit)
+    }
+
+    const onUp = () => {
+      setMarquee(null)
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+    }
+
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }
 
   // The desktop has a real file manager; this would be a worse version of it.
   if (!capabilities.fileBrowser) {
@@ -845,6 +1039,15 @@ export function FileBrowserProvider({
 
             <main className="flex min-w-0 flex-1 flex-col">
               <ScrollArea className="min-h-0 flex-1">
+                {/* The drag surface. `min-h-full` so an almost-empty folder
+                    still gives you somewhere to start a box, and `relative`
+                    only to establish a containing block - the box itself is
+                    fixed, and positioned in viewport coordinates. */}
+                <div
+                  ref={contentRef}
+                  onMouseDown={startMarquee}
+                  className="relative min-h-full select-none"
+                >
                 {loading && !listing ? (
                   <div className="flex min-h-40 items-center justify-center py-16">
                     <Spinner />
@@ -861,18 +1064,20 @@ export function FileBrowserProvider({
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(136px,1fr))] gap-2 p-3">
                     {visible.map((entry) => {
                       const Icon = iconFor(entry)
-                      const active = selected?.path === entry.path
+                      const active = selection.has(entry.path)
 
                       return (
                         <button
                           key={entry.path}
                           type="button"
-                          onClick={() => setSelected(entry)}
+                          data-entry-path={entry.path}
+                          aria-pressed={active}
+                          onClick={(event) => selectEntry(entry, event)}
                           onDoubleClick={() => openEntry(entry)}
                           className={cn(
                             "flex flex-col items-center gap-2 border p-3 text-center transition-colors",
                             active
-                              ? "border-foreground/30 bg-[color-mix(in_oklab,var(--foreground)_8%,transparent)]"
+                              ? "border-primary bg-primary/20"
                               : "border-transparent hover:bg-[color-mix(in_oklab,var(--foreground)_5%,transparent)]"
                           )}
                         >
@@ -931,17 +1136,19 @@ export function FileBrowserProvider({
                     <tbody>
                       {visible.map((entry) => {
                         const Icon = iconFor(entry)
-                        const active = selected?.path === entry.path
+                        const active = selection.has(entry.path)
 
                         return (
                           <tr
                             key={entry.path}
-                            onClick={() => setSelected(entry)}
+                            data-entry-path={entry.path}
+                            aria-selected={active}
+                            onClick={(event) => selectEntry(entry, event)}
                             onDoubleClick={() => openEntry(entry)}
                             className={cn(
                               "border-b border-border/50 transition-colors",
                               active
-                                ? "bg-[color-mix(in_oklab,var(--foreground)_8%,transparent)]"
+                                ? "bg-primary/20 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-primary"
                                 : "hover:bg-[color-mix(in_oklab,var(--foreground)_4%,transparent)]"
                             )}
                           >
@@ -1004,7 +1211,14 @@ export function FileBrowserProvider({
                     </tbody>
                   </table>
                 )}
+                </div>
               </ScrollArea>
+
+              {/* The selection box. Clamped to the content pane so dragging
+                  past its edge does not paint over the tree or the details
+                  panel, and `pointer-events-none` so it never becomes the
+                  target of its own drag. */}
+              {marquee ? <MarqueeBox rect={marquee} within={contentRef} /> : null}
 
               {/* The count, and the one thing worth stating plainly about a
                   file manager with no delete button. */}
@@ -1012,7 +1226,9 @@ export function FileBrowserProvider({
                 <span>
                   {loading
                     ? "loading"
-                    : `${visible.length} of ${listing?.count ?? 0} items`}
+                    : selection.size > 0
+                      ? `${selection.size} selected of ${visible.length}`
+                      : `${visible.length} of ${listing?.count ?? 0} items`}
                 </span>
                 <span>read-only · on the server</span>
               </div>
@@ -1093,6 +1309,19 @@ export function FileBrowserProvider({
                       </div>
                     ) : null}
                   </>
+                ) : selection.size > 1 ? (
+                  /* Nothing to describe when six things are selected, so it
+                     answers the question that does have one answer. */
+                  <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">
+                    <p className="text-sm">{selection.size} items selected</p>
+                    <p className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground uppercase">
+                      {formatBytes(
+                        visible
+                          .filter((entry) => selection.has(entry.path))
+                          .reduce((total, entry) => total + (entry.size ?? 0), 0)
+                      )}
+                    </p>
+                  </div>
                 ) : (
                   <div className="flex h-full items-center justify-center p-6 text-center text-[11px] text-muted-foreground">
                     Select a file to see its details.
@@ -1106,6 +1335,47 @@ export function FileBrowserProvider({
     </FileBrowserContext.Provider>
   )
 }
+
+/**
+ * The drag rectangle.
+ *
+ * Fixed-positioned in viewport coordinates, which is what lets the hit test use
+ * `getBoundingClientRect` directly and keeps a list that scrolls mid-drag
+ * correct with no arithmetic of its own. Clamped to the pane it belongs to, so
+ * dragging past an edge does not paint across the tree or the details panel.
+ */
+function MarqueeBox({
+  rect,
+  within,
+}: {
+  rect: { x1: number; y1: number; x2: number; y2: number }
+  within: React.RefObject<HTMLDivElement | null>
+}) {
+  const bounds = within.current?.getBoundingClientRect()
+  const left = Math.min(rect.x1, rect.x2)
+  const top = Math.min(rect.y1, rect.y2)
+  const right = Math.max(rect.x1, rect.x2)
+  const bottom = Math.max(rect.y1, rect.y2)
+
+  const clampedLeft = bounds ? Math.max(left, bounds.left) : left
+  const clampedTop = bounds ? Math.max(top, bounds.top) : top
+  const clampedRight = bounds ? Math.min(right, bounds.right) : right
+  const clampedBottom = bounds ? Math.min(bottom, bounds.bottom) : bottom
+
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none fixed z-50 border border-primary bg-primary/20"
+      style={{
+        left: clampedLeft,
+        top: clampedTop,
+        width: Math.max(0, clampedRight - clampedLeft),
+        height: Math.max(0, clampedBottom - clampedTop),
+      }}
+    />
+  )
+}
+
 
 /**
  * The stand-in where there is nothing to show a thumbnail of.
