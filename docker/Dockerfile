@@ -147,8 +147,16 @@ ENV INFERNO_WEB_ROOT=/app/web
 # writes them, the storage layer uploads them - but they are on the volume all
 # the same, because a 4K download that vanishes on restart is worse than one
 # that takes disk.
+# STATE_FILE is what makes the queue survive a restart. The service defaults it
+# off: jobs live in memory and die with the process (SPEC §2), which is right
+# for a desktop app that starts and stops with its window. A server is the
+# opposite case - browser tabs outlive it, and a queue that empties itself on
+# every deploy is not a queue. Only finished jobs are written; a download
+# interrupted mid-flight cannot be resumed from a file, and a restored job
+# stuck at "downloading" forever would be worse than an absent one.
 ENV DOWNLOAD_DIR=/data/downloads \
     INFERNO_CONFIG_FILE=/data/inferno-settings.json \
+    STATE_FILE=/data/inferno-jobs.json \
     PYTHONUNBUFFERED=1
 
 # Run as nobody. yt-dlp executes extractor code from the open internet, and

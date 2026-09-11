@@ -1,6 +1,7 @@
 "use client"
 
 import {
+  Fragment,
   createContext,
   createElement,
   useCallback,
@@ -16,6 +17,7 @@ import {
   RiArrowRightSLine,
   RiArrowUpLine,
   RiDownload2Line,
+  RiEditLine,
   RiExternalLinkLine,
   RiFileLine,
   RiFileTextLine,
@@ -32,6 +34,15 @@ import {
 } from "@remixicon/react"
 import { toast } from "sonner"
 
+import {
+  Breadcrumb,
+  BreadcrumbEllipsis,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -313,6 +324,13 @@ export function FileBrowserProvider({
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const searchRef = useRef<HTMLInputElement>(null)
+  const pathRef = useRef<HTMLInputElement>(null)
+
+  // The explorer bar's two forms. `draftPath` is only live while typing, so
+  // navigating never has to write back into it and a half-typed path is never
+  // mistaken for where you are.
+  const [editingPath, setEditingPath] = useState(false)
+  const [draftPath, setDraftPath] = useState("")
 
   /**
    * Move to a directory, and reset what the last one left behind.
@@ -324,6 +342,8 @@ export function FileBrowserProvider({
    */
   const navigate = useCallback((path: string, highlight: string | null) => {
     setState({ path, highlight })
+    setEditingPath(false)
+    setDraftPath("")
     setSelected(null)
     setQuery("")
     setLoading(true)
@@ -420,6 +440,22 @@ export function FileBrowserProvider({
     [childrenByPath, client]
   )
 
+  // Focus only. Seeding the field happens in `startEditingPath`, where the
+  // decision to show it is made - doing it here would be a setState inside an
+  // effect, and a second render pass before the field is even visible.
+  useEffect(() => {
+    if (!editingPath) {
+      return
+    }
+    pathRef.current?.focus()
+    pathRef.current?.select()
+  }, [editingPath])
+
+  const startEditingPath = useCallback(() => {
+    setDraftPath(listing?.path ?? "")
+    setEditingPath(true)
+  }, [listing])
+
   const close = useCallback((open: boolean) => {
     if (!open) {
       setState(null)
@@ -427,6 +463,8 @@ export function FileBrowserProvider({
       setError(null)
       setSelected(null)
       setQuery("")
+      setEditingPath(false)
+      setDraftPath("")
     }
   }, [])
 
@@ -438,16 +476,26 @@ export function FileBrowserProvider({
     }
 
     function onKeyDown(event: KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+      if (!event.ctrlKey && !event.metaKey) {
+        return
+      }
+      const key = event.key.toLowerCase()
+      if (key === "f") {
         event.preventDefault()
         searchRef.current?.focus()
+      }
+      // Ctrl+L to the address bar, which is where every browser and file
+      // manager puts it.
+      if (key === "l") {
+        event.preventDefault()
+        startEditingPath()
       }
     }
 
     window.addEventListener("keydown", onKeyDown)
 
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [state])
+  }, [state, startEditingPath])
 
   const visible = useMemo(() => {
     const entries = listing?.entries ?? []
@@ -523,14 +571,15 @@ export function FileBrowserProvider({
       {children}
       <Dialog open={state !== null} onOpenChange={close}>
         <DialogContent
-          // Far bigger than the default `sm:max-w-md`, and a fixed share of the
-          // viewport rather than content height: a file list that resizes the
-          // dialog as you move between folders is unusable. Padding drops to
-          // zero because the panes own their own edges.
-          className="flex h-[82dvh] w-[min(1100px,calc(100%-2rem))] max-w-none flex-col gap-0 p-0 sm:max-w-none"
+          // Deliberately close to the whole viewport. This is a file manager,
+          // and the thing it is worst at is showing six items through a
+          // letterbox. Height is a fixed share rather than content-driven: a
+          // list that resizes its own dialog as you move between folders is
+          // unusable. Padding drops to zero because the panes own their edges.
+          className="flex h-[92dvh] w-[min(1600px,calc(100%-2rem))] max-w-none flex-col gap-0 p-0 sm:max-w-none"
         >
-          <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
-            <div className="flex items-center gap-2 pr-10">
+          <div className="flex shrink-0 flex-col border-b">
+            <div className="flex items-center gap-2 px-4 pt-3 pr-12">
               <DialogTitle className="font-mono text-[10.5px] tracking-[0.12em] text-muted-foreground uppercase">
                 Files
               </DialogTitle>
@@ -539,7 +588,11 @@ export function FileBrowserProvider({
               </DialogDescription>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            {/* The explorer bar: where you are, and how to get somewhere else.
+                Its own row rather than sharing one with the controls - it is
+                the thing you read most and click most, and a path is the one
+                element here with no natural width. */}
+            <div className="flex items-center gap-2 px-4 py-2">
               <Button
                 type="button"
                 variant="ghost"
@@ -552,44 +605,134 @@ export function FileBrowserProvider({
                 <RiArrowUpLine className="size-3.5" />
               </Button>
 
-              {/* Breadcrumbs. The root is an icon so it is always one click
-                  away and never truncated to nothing. */}
-              <nav
-                aria-label="Breadcrumb"
-                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden"
-              >
-                <button
-                  type="button"
-                  onClick={() => navigate("", null)}
-                  className="flex shrink-0 items-center gap-1 font-mono text-[10px] tracking-[0.08em] text-muted-foreground uppercase transition-colors hover:text-foreground"
+              {editingPath ? (
+                /* The typed form of the same bar. Every file manager has one
+                   behind Ctrl+L, because pasting a path beats clicking down to
+                   it - and this one is the only way to reach a folder whose
+                   name you know but whose parent is a long way up. */
+                <form
+                  className="flex min-w-0 flex-1 items-center gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    navigate(draftPath.trim(), null)
+                    setEditingPath(false)
+                  }}
                 >
-                  <RiHome3Line className="size-3" />
-                  downloads
-                </button>
-                {crumbs.map((crumb, index) => (
-                  <span
-                    key={crumb.path}
-                    className="flex min-w-0 items-center gap-1"
-                  >
-                    <RiArrowRightSLine
-                      aria-hidden
-                      className="size-3 shrink-0 text-muted-foreground/50"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => navigate(crumb.path, null)}
-                      className={cn(
-                        "truncate font-mono text-[10px] tracking-[0.08em] transition-colors hover:text-foreground",
-                        index === crumbs.length - 1
-                          ? "text-foreground"
-                          : "text-muted-foreground"
+                  <Input
+                    ref={pathRef}
+                    value={draftPath}
+                    onChange={(event) => setDraftPath(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault()
+                        setEditingPath(false)
+                      }
+                    }}
+                    aria-label="Path"
+                    placeholder="downloads/…"
+                    className="h-8 font-mono text-[11px]"
+                  />
+                  <Button type="submit" variant="outline" size="sm">
+                    Go
+                  </Button>
+                </form>
+              ) : (
+                <Breadcrumb className="min-w-0 flex-1 overflow-hidden">
+                  <BreadcrumbList className="flex-nowrap gap-1 font-mono text-[10px] tracking-[0.08em] sm:gap-1.5">
+                    <BreadcrumbItem className="shrink-0">
+                      {crumbs.length === 0 ? (
+                        <BreadcrumbPage className="flex items-center gap-1">
+                          <RiHome3Line className="size-3" />
+                          downloads
+                        </BreadcrumbPage>
+                      ) : (
+                        <BreadcrumbLink
+                          render={
+                            <button
+                              type="button"
+                              onClick={() => navigate("", null)}
+                              className="flex items-center gap-1"
+                            />
+                          }
+                        >
+                          <RiHome3Line className="size-3" />
+                          downloads
+                        </BreadcrumbLink>
                       )}
-                    >
-                      {crumb.name}
-                    </button>
-                  </span>
-                ))}
-              </nav>
+                    </BreadcrumbItem>
+
+                    {/* A deep path collapses in the middle rather than
+                        squeezing every segment to nothing. The first and last
+                        two are what orient you; the rest is what the typed
+                        form is for. */}
+                    {crumbs.length > 3 ? (
+                      <>
+                        <BreadcrumbSeparator className="shrink-0" />
+                        <BreadcrumbItem className="shrink-0">
+                          <BreadcrumbLink
+                            render={
+                              <button
+                                type="button"
+                                title="Type the full path"
+                                onClick={startEditingPath}
+                              />
+                            }
+                          >
+                            <BreadcrumbEllipsis />
+                          </BreadcrumbLink>
+                        </BreadcrumbItem>
+                      </>
+                    ) : null}
+
+                    {(crumbs.length > 3 ? crumbs.slice(-2) : crumbs).map(
+                      (crumb, index, shown) => (
+                        <Fragment key={crumb.path}>
+                          <BreadcrumbSeparator className="shrink-0" />
+                          <BreadcrumbItem className="min-w-0">
+                            {index === shown.length - 1 ? (
+                              <BreadcrumbPage className="truncate">
+                                {crumb.name}
+                              </BreadcrumbPage>
+                            ) : (
+                              <BreadcrumbLink
+                                className="truncate"
+                                render={
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate(crumb.path, null)}
+                                  />
+                                }
+                              >
+                                {crumb.name}
+                              </BreadcrumbLink>
+                            )}
+                          </BreadcrumbItem>
+                        </Fragment>
+                      )
+                    )}
+                  </BreadcrumbList>
+                </Breadcrumb>
+              )}
+
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title={editingPath ? "Show breadcrumbs" : "Type a path (Ctrl+L)"}
+                aria-label={
+                  editingPath ? "Show breadcrumbs" : "Type a path"
+                }
+                aria-pressed={editingPath}
+                onClick={() =>
+                  editingPath ? setEditingPath(false) : startEditingPath()
+                }
+                className={cn("shrink-0", editingPath && "text-foreground")}
+              >
+                <RiEditLine className="size-3.5" />
+              </Button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
 
               <div className="relative w-44 shrink-0">
                 <RiSearchLine

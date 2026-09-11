@@ -138,6 +138,20 @@ SETTINGS: tuple[Setting, ...] = (
         env="DOWNLOAD_DIR",
     ),
     Setting(
+        key="downloads.state_file",
+        field="state_file",
+        type="path",
+        default="",
+        group="downloads",
+        label="Remember finished jobs in",
+        description=(
+            "A file to keep the finished queue in, so it survives a restart. "
+            "Empty keeps jobs in memory only, which is the default."
+        ),
+        env="STATE_FILE",
+        runtime=False,
+    ),
+    Setting(
         key="downloads.max_concurrent",
         field="max_concurrent",
         type="int",
@@ -575,6 +589,9 @@ class Settings:
     """
 
     download_dir: Path = Path("./downloads")
+    #: Where the finished queue is remembered, or "" to keep it in memory only
+    #: (the default, and what the desktop uses).
+    state_file: str = ""
     max_concurrent: int = 2
     job_ttl: int = 86_400
     event_history: int = 250

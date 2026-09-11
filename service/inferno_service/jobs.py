@@ -21,6 +21,7 @@ own worker thread, so every mutation of job state and every event is handed to
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 import os
@@ -128,6 +129,22 @@ def _unique_path(target: Path) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
+
+
+#: Dropped before a job is written to the state file. yt-dlp lists an automatic
+#: caption track per language it could generate, which for a YouTube video is
+#: around 460 KB of the roughly 560 KB a job weighs - by far the largest thing
+#: on it, and the only large thing no client reads. Everything else the details
+#: view shows (formats, real subtitles, thumbnails) is kept, so a remembered job
+#: looks the same as one still in memory.
+_UNPERSISTED_VIDEO_FIELDS = ("automatic_captions",)
+
+
+def _slim_video(video: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not video:
+        return video
+
+    return {k: v for k, v in video.items() if k not in _UNPERSISTED_VIDEO_FIELDS}
 
 
 def _describe_file(job_id: str, path: Path) -> dict[str, Any]:
@@ -378,6 +395,105 @@ class JobManager:
         self._gate = _ConcurrencyGate(settings.max_concurrent)
         self._sweeper: asyncio.Task[None] | None = None
         self._closing = False
+        self._state_file = (
+            Path(settings.state_file).expanduser() if settings.state_file else None
+        )
+        self._restore()
+
+    # --- remembering the finished queue ------------------------------------
+    #
+    # Off unless ``STATE_FILE`` names somewhere to write, which keeps the
+    # desktop exactly as it was: jobs in memory, gone on restart (SPEC §2).
+    # A server is the case that needs more - a browser tab reloads against a
+    # service that may have been restarted under it, and a queue that empties
+    # itself every deploy is not a queue.
+    #
+    # Only *terminal* jobs are written. A download interrupted mid-flight
+    # cannot be resumed from a file - yt-dlp holds the connection, the partial
+    # is in the staging folder - so recording it would restore a job that says
+    # "downloading" and never moves again. Better it be absent than a lie.
+
+    def _restore(self) -> None:
+        if self._state_file is None or not self._state_file.is_file():
+            return
+        try:
+            payload = json.loads(self._state_file.read_text(encoding="utf-8"))
+            entries = payload.get("jobs", [])
+        except (OSError, ValueError):
+            # A truncated or hand-edited file loses history, which is a far
+            # smaller problem than refusing to start over it.
+            log.warning("could not read the job state file; starting empty")
+            return
+
+        for entry in entries:
+            try:
+                job = self._job_from_dict(entry)
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Files are swept on their own schedule and can be deleted from
+            # under us, so a remembered job whose files have all gone is
+            # history nobody can act on.
+            if job.status == JobStatus.COMPLETED and not any(
+                Path(f["path"]).exists() for f in job.files if f.get("path")
+            ):
+                continue
+            self._jobs[job.job_id] = job
+            self._order.append(job.job_id)
+
+    def _job_from_dict(self, entry: Mapping[str, Any]) -> Job:
+        """Rebuild a finished job well enough to be listed and acted on.
+
+        ``resolution`` is reconstructed from its summary alone. That is the
+        only part of it anything reads for a terminal job - ``ydl_opts`` is
+        used solely while a download is running, which this one never will be
+        again.
+        """
+        return Job(
+            job_id=entry["job_id"],
+            url=entry["url"],
+            directory=Path(entry["directory"]),
+            resolution=Resolution(summary=dict(entry.get("options") or {}), ydl_opts={}),
+            published=[Path(p) for p in entry.get("published") or []],
+            status=entry["status"],
+            video=entry.get("video"),
+            playlist=entry.get("playlist"),
+            progress=entry.get("progress"),
+            files=list(entry.get("files") or []),
+            error=entry.get("error"),
+            created_at=float(entry.get("created_at") or time.time()),
+            started_at=entry.get("started_at"),
+            finished_at=entry.get("finished_at"),
+        )
+
+    def _persist(self) -> None:
+        if self._state_file is None:
+            return
+
+        entries = [
+            {
+                **job.to_dict(),
+                # `to_dict` reports where the files ended up; restoring needs
+                # the staging folder too, since that is what the sweep removes.
+                "directory": str(job.directory),
+                "published": [str(path) for path in job.published],
+                "video": _slim_video(job.video),
+            }
+            for job_id in self._order
+            if (job := self._jobs.get(job_id)) is not None and job.terminal
+        ]
+
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            # Written beside the target and moved into place, so a crash
+            # mid-write leaves the previous file rather than half of this one.
+            temporary = self._state_file.with_suffix(f"{self._state_file.suffix}.tmp")
+            temporary.write_text(
+                json.dumps({"version": 1, "jobs": entries}, indent=1),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self._state_file)
+        except OSError:
+            log.warning("could not write the job state file", exc_info=True)
 
     async def apply_settings(self, settings: Settings) -> None:
         """Adopt a new settings snapshot. Running jobs are never interrupted."""
@@ -619,6 +735,9 @@ class JobManager:
         if error is not None:
             data["error"] = error
         self._events.publish(_STATUS_EVENT[status], job.job_id, data)
+        # The only moment a job's recorded form changes. Everything before this
+        # is in flight and deliberately not written.
+        self._persist()
 
     def _apply_info(self, job: Job, info: Mapping[str, Any] | None) -> None:
         if not info:
@@ -752,6 +871,7 @@ class JobManager:
         if job_id in self._order:
             self._order.remove(job_id)
         self._events.drop_channel(job_channel(job_id))
+        self._persist()
         if not keep_files:
             # Published files now live among everyone else's in the shared
             # download folder, so they are removed one by one - never by
@@ -797,6 +917,8 @@ class JobManager:
             self._events.drop_channel(job_channel(job_id))
             if job is not None:
                 shutil.rmtree(job.directory, ignore_errors=True)
+        if expired:
+            self._persist()
         return expired
 
     def __iter__(self) -> Iterable[Job]:  # pragma: no cover - convenience

@@ -46,6 +46,9 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:8765}
       DOWNLOAD_DIR: /data/downloads
       INFERNO_CONFIG_FILE: /data/inferno-settings.json
+      # Keeps the finished queue across restarts and re-pulls. Empty it to go
+      # back to in-memory jobs.
+      STATE_FILE: ${STATE_FILE:-/data/inferno-jobs.json}
       MAX_CONCURRENT: ${MAX_CONCURRENT:-2}
       # Downloads from a datacenter IP get bot-checked by YouTube far more than
       # from a home connection. If jobs fail on a VPS but work on your desktop,
