@@ -13,6 +13,7 @@ import {
 } from "react"
 
 import {
+  RiAlertLine,
   RiArrowDownSLine,
   RiArrowRightSLine,
   RiArrowUpLine,
@@ -61,7 +62,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Empty } from "@/components/ui/empty"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
@@ -1216,19 +1224,60 @@ export function FileBrowserProvider({
                 <div
                   ref={contentRef}
                   onMouseDown={startMarquee}
-                  className="relative min-h-full select-none"
+                  // A flex column so the states below can take `flex-1` and
+                  // centre in whatever height the pane has, rather than sitting
+                  // at the top under a guessed `min-h`. `Empty` already carries
+                  // `flex-1` and centres its own content, so it needs nothing
+                  // but a parent that gives it room.
+                  className="relative flex min-h-full flex-col select-none"
                 >
                 {loading && !listing ? (
-                  <div className="flex min-h-40 items-center justify-center py-16">
+                  <div className="flex flex-1 items-center justify-center">
                     <Spinner />
                   </div>
                 ) : error ? (
-                  <Empty className="min-h-40 py-16">{error}</Empty>
+                  <Empty>
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <RiAlertLine />
+                      </EmptyMedia>
+                      <EmptyTitle>Could not read this folder</EmptyTitle>
+                      <EmptyDescription>{error}</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
                 ) : visible.length === 0 ? (
-                  <Empty className="min-h-40 py-16">
-                    {query
-                      ? `Nothing here matches "${query}".`
-                      : "This folder is empty."}
+                  <Empty>
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        {query ? <RiSearchLine /> : <RiFolderOpenLine />}
+                      </EmptyMedia>
+                      <EmptyTitle>
+                        {query ? "No matches" : "Empty folder"}
+                      </EmptyTitle>
+                      <EmptyDescription>
+                        {query
+                          ? `Nothing in this folder is called “${query}”.`
+                          : "Nothing has been downloaded into this folder yet."}
+                      </EmptyDescription>
+                    </EmptyHeader>
+                    {/* An empty folder is the one place where making another
+                        one is the obvious next thing, so it is offered rather
+                        than left to the right-click menu. Not shown while
+                        searching - the folder is not empty then, the filter
+                        is. */}
+                    {query ? null : (
+                      <EmptyContent>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={createFolder}
+                        >
+                          <RiFolderAddLine className="size-3.5" />
+                          New folder
+                        </Button>
+                      </EmptyContent>
+                    )}
                   </Empty>
                 ) : view === "cards" ? (
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(136px,1fr))] gap-2 p-3">
