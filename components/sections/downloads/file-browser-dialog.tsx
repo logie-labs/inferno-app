@@ -57,12 +57,18 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
+  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Empty } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
+import {
+  ConfirmDialog,
+  type ConfirmRequest,
+} from "@/components/confirm-dialog"
 import { capabilities } from "@/lib/deployment"
 import { downloadFile, openFile, parentOf } from "@/lib/file-actions"
 import { formatBytes } from "@/lib/format"
@@ -345,6 +351,9 @@ export function FileBrowserProvider({
     y2: number
   } | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  /** The two questions this asks, as dialogs rather than browser chrome. */
+  const [naming, setNaming] = useState<NameRequest | null>(null)
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   /**
    * What the key handler reads, rather than what it depends on.
    *
@@ -803,21 +812,37 @@ export function FileBrowserProvider({
   }
 
   const createFolder = () => {
-    const name = window.prompt("New folder name")
-    if (!name || !client) {
+    if (!client) {
       return
     }
-    void runFileAction("create the folder", () =>
-      client.createFolder(listing?.path ?? "", name)
-    )
+    setNaming({
+      title: "New folder",
+      label: "Name",
+      confirmLabel: "Create",
+      initial: "",
+      run: (name) =>
+        void runFileAction("create the folder", () =>
+          client.createFolder(listing?.path ?? "", name)
+        ),
+    })
   }
 
   const renameEntry = (entry: FileEntry) => {
-    const name = window.prompt("Rename to", entry.name)
-    if (!name || name === entry.name || !client) {
+    if (!client) {
       return
     }
-    void runFileAction("rename", () => client.renameFile(entry.path, name))
+    setNaming({
+      title: `Rename ${entry.type === "directory" ? "folder" : "file"}`,
+      label: "Name",
+      confirmLabel: "Rename",
+      initial: entry.name,
+      run: (name) => {
+        if (name === entry.name) {
+          return
+        }
+        void runFileAction("rename", () => client.renameFile(entry.path, name))
+      },
+    })
   }
 
   /**
@@ -829,23 +854,27 @@ export function FileBrowserProvider({
    */
   const deleteEntries = (entry: FileEntry) => {
     const targets = selection.has(entry.path) ? selectedEntries : [entry]
-    const what =
-      targets.length === 1
-        ? `"${targets[0].name}"`
-        : `${targets.length} items`
-    if (
-      !client ||
-      !window.confirm(
-        `Delete ${what}? This removes it from the server and cannot be undone.`
-      )
-    ) {
+    if (!client || targets.length === 0) {
       return
     }
-    void runFileAction("delete", async () => {
-      for (const target of targets) {
-        await client.deleteFile(target.path)
-      }
-      setSelection(new Set())
+    const what =
+      targets.length === 1 ? targets[0].name : `${targets.length} items`
+
+    setConfirm({
+      title: `Delete ${what}?`,
+      description:
+        targets.length === 1 && targets[0].type === "directory"
+          ? "The folder and everything in it is removed from the server. This cannot be undone."
+          : "This removes it from the server. Downloads already in the queue keep their entry and will show the file as missing. This cannot be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+      run: () =>
+        void runFileAction("delete", async () => {
+          for (const target of targets) {
+            await client.deleteFile(target.path)
+          }
+          setSelection(new Set())
+        }),
     })
   }
 
@@ -962,10 +991,14 @@ export function FileBrowserProvider({
                 </form>
               ) : (
                 <Breadcrumb className="min-w-0 shrink overflow-hidden">
-                  <BreadcrumbList className="flex-nowrap gap-1 font-mono text-[10px] tracking-[0.08em] sm:gap-1.5">
+                  {/* `normal-case`: the component uppercases by default, and
+                      a path has to read as the names on disk. An override
+                      rather than a change to the component - that default is
+                      theirs, and this is the one place it is wrong. */}
+                      <BreadcrumbList className="flex-nowrap gap-1 font-mono text-[10px] tracking-[0.08em] normal-case sm:gap-1.5">
                     <BreadcrumbItem className="shrink-0">
                       {crumbs.length === 0 ? (
-                        <BreadcrumbPage className="flex items-center gap-1 uppercase">
+                        <BreadcrumbPage className="flex items-center gap-1">
                           <RiHome3Line className="size-3" />
                           downloads
                         </BreadcrumbPage>
@@ -975,13 +1008,7 @@ export function FileBrowserProvider({
                             <button
                               type="button"
                               onClick={() => navigate("", null)}
-                              // `uppercase` on each crumb rather than once on
-                              // the list. text-transform does inherit - but the
-                              // UA stylesheet sets `text-transform: none` on
-                              // buttons, which is exactly why the root read
-                              // DOWNLOADS as a span and downloads the moment
-                              // entering a folder turned it into a link.
-                              className="flex items-center gap-1 uppercase"
+                              className="flex items-center gap-1"
                             />
                           }
                         >
@@ -1020,7 +1047,7 @@ export function FileBrowserProvider({
                           <BreadcrumbSeparator className="shrink-0" />
                           <BreadcrumbItem className="min-w-0">
                             {index === shown.length - 1 ? (
-                              <BreadcrumbPage className="truncate uppercase">
+                              <BreadcrumbPage className="truncate">
                                 {crumb.name}
                               </BreadcrumbPage>
                             ) : (
@@ -1029,7 +1056,7 @@ export function FileBrowserProvider({
                                   <button
                                     type="button"
                                     onClick={() => navigate(crumb.path, null)}
-                                    className="truncate uppercase"
+                                    className="truncate"
                                   />
                                 }
                               >
@@ -1477,7 +1504,127 @@ export function FileBrowserProvider({
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Siblings of the browser rather than children of it: both portal to
+          the body, and the browser stays open behind whichever is asking. */}
+      {naming ? (
+        <NameDialog
+          // A new question is a new instance, so the field starts from the
+          // right value without an effect writing into the previous one.
+          key={`${naming.title}:${naming.initial}`}
+          request={naming}
+          onOpenChange={(open) => {
+            if (!open) {
+              setNaming(null)
+            }
+          }}
+        />
+      ) : null}
+      <ConfirmDialog
+        request={confirm}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirm(null)
+          }
+        }}
+      />
     </FileBrowserContext.Provider>
+  )
+}
+
+type NameRequest = {
+  title: string
+  label: string
+  confirmLabel: string
+  initial: string
+  run: (name: string) => void
+}
+
+/**
+ * Ask for a name.
+ *
+ * `window.prompt` did this first and was wrong twice over: it is the browser's
+ * chrome rather than the app's, and in a dialog-heavy UI it arrives looking
+ * like something the page did not mean to do. It also cannot be styled, cannot
+ * show what it is renaming, and blocks the event loop while it is open.
+ *
+ * The field is selected on open, so typing replaces - which is what you want
+ * for a rename and harmless for a new folder.
+ */
+function NameDialog({
+  request,
+  onOpenChange,
+}: {
+  request: NameRequest
+  onOpenChange: (open: boolean) => void
+}) {
+  // Seeded once, on mount. The caller keys this component on the request, so a
+  // new question is a new instance rather than an effect writing state into the
+  // old one - which is the same reset, done where React can see it.
+  const [value, setValue] = useState(request.initial)
+  const fieldRef = useRef<HTMLInputElement>(null)
+
+  // Focus only, a frame later so the dialog has mounted and can take it.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      fieldRef.current?.focus()
+      fieldRef.current?.select()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const trimmed = value.trim()
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{request.title}</DialogTitle>
+        </DialogHeader>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!trimmed) {
+              return
+            }
+            request.run(trimmed)
+            onOpenChange(false)
+          }}
+        >
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="inferno-name-field"
+              className="font-mono text-[10px] tracking-[0.1em] text-muted-foreground uppercase"
+            >
+              {request.label}
+            </label>
+            <Input
+              id="inferno-name-field"
+              ref={fieldRef}
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" disabled={!trimmed}>
+              {request.confirmLabel}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
