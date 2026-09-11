@@ -9,6 +9,7 @@ import {
   RiFolderOpenLine,
 } from "@remixicon/react"
 
+import { useFileBrowser } from "@/components/sections/downloads/file-browser-dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -17,6 +18,7 @@ import {
   pickDirectory,
   type DirectoryCheck,
 } from "@/lib/inferno-service"
+import { capabilities } from "@/lib/deployment"
 import { cn } from "@/lib/utils"
 
 /**
@@ -90,6 +92,7 @@ export function FolderField({
   action?: ReactNode
   className?: string
 }) {
+  const fileBrowser = useFileBrowser()
   const [check, setCheck] = useState<{
     path: string
     result: DirectoryCheck
@@ -146,7 +149,14 @@ export function FolderField({
           title="Choose a folder"
           aria-label="Choose a folder"
           onClick={() => {
-            void pickDirectory(target).then((picked) => {
+            // The OS dialog where there is one, the app's file browser where
+            // there is not. Both answer with an absolute path, so the field
+            // does not care which it got.
+            const chosen = capabilities.localFilesystem
+              ? pickDirectory(target)
+              : fileBrowser.pickFolder()
+
+            void chosen.then((picked) => {
               if (picked) {
                 onValueChange(picked)
               }

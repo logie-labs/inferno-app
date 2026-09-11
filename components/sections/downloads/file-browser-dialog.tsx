@@ -17,6 +17,7 @@ import {
   RiArrowDownSLine,
   RiArrowRightSLine,
   RiArrowUpLine,
+  RiCheckLine,
   RiDeleteBinLine,
   RiDownload2Line,
   RiEditLine,
@@ -137,6 +138,19 @@ type FileBrowserValue = {
   browse: () => void
   /** Open at a file's folder, with that file selected. */
   reveal: (path: string) => void
+  /**
+   * Open as a folder picker, resolving with an absolute path or null.
+   *
+   * The browser's answer to the native directory dialog the desktop opens.
+   * Absolute rather than root-relative because that is what the settings it
+   * feeds already hold, and what the desktop's picker returns - the field
+   * receiving it should not have to know which product it is in.
+   *
+   * Bounded to the download folder like everything else here, which is the
+   * honest limit: a save location has to be somewhere the service can write,
+   * and that is the folder it owns.
+   */
+  pickFolder: (startAt?: string) => Promise<string | null>
 }
 
 const FileBrowserContext = createContext<FileBrowserValue | null>(null)
@@ -151,6 +165,9 @@ const FileBrowserContext = createContext<FileBrowserValue | null>(null)
 const NO_BROWSER: FileBrowserValue = {
   browse: () => {},
   reveal: () => {},
+  // The desktop opens the OS picker instead, so nothing here should be
+  // waiting on this one.
+  pickFolder: async () => null,
 }
 
 export function useFileBrowser(): FileBrowserValue {
@@ -359,7 +376,7 @@ export function FileBrowserProvider({
 }: {
   children: React.ReactNode
 }) {
-  const { client } = useInfernoService()
+  const { client, health } = useInfernoService()
 
   const [state, setState] = useState<BrowserState | null>(null)
   const [listing, setListing] = useState<FileListing | null>(null)
@@ -393,6 +410,15 @@ export function FileBrowserProvider({
     y2: number
   } | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  /**
+   * Set while the dialog is standing in for a directory picker.
+   *
+   * The resolver lives in a ref rather than state because it is not rendered
+   * and must survive every re-render between opening and answering - and
+   * because settling a promise is a side effect, not a value.
+   */
+  const [picking, setPicking] = useState(false)
+  const pickResolver = useRef<((value: string | null) => void) | null>(null)
   /** The two questions this asks, as dialogs rather than browser chrome. */
   const [naming, setNaming] = useState<NameRequest | null>(null)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
@@ -451,8 +477,23 @@ export function FileBrowserProvider({
 
   const value = useMemo<FileBrowserValue>(
     () => ({
-      browse: () => navigate("", null),
-      reveal: (path: string) => navigate(parentOf(path), baseName(path)),
+      browse: () => {
+        setPicking(false)
+        navigate("", null)
+      },
+      reveal: (path: string) => {
+        setPicking(false)
+        navigate(parentOf(path), baseName(path))
+      },
+      pickFolder: (startAt?: string) =>
+        new Promise<string | null>((resolve) => {
+          // A picker already open is answered with null rather than left
+          // hanging - two callers waiting on one dialog can only confuse it.
+          pickResolver.current?.(null)
+          pickResolver.current = resolve
+          setPicking(true)
+          navigate(startAt ?? "", null)
+        }),
     }),
     [navigate]
   )
@@ -561,6 +602,11 @@ export function FileBrowserProvider({
 
   const close = useCallback((open: boolean) => {
     if (!open) {
+      // Closing without choosing is a cancellation, and a caller awaiting
+      // this needs to hear that rather than wait forever.
+      pickResolver.current?.(null)
+      pickResolver.current = null
+      setPicking(false)
       setState(null)
       setListing(null)
       setError(null)
@@ -1070,6 +1116,33 @@ export function FileBrowserProvider({
       // recognises as part of it and acts on the whole set.
       deleteEntries(chosen[0])
     }
+  }
+
+  /**
+   * Answer the picker with the folder currently open.
+   *
+   * Confirming *where you are* rather than what is highlighted, which is how
+   * every "choose folder" dialog works: you navigate into the folder you mean
+   * and say so. It also sidesteps a question the other form raises - what it
+   * means to have three folders selected when the caller wants one.
+   *
+   * Absolute, built from the root `/health` reports. Falls back to the
+   * relative path if the service has not answered yet, which is better than
+   * handing back something that looks absolute and is not.
+   */
+  const confirmPick = () => {
+    const relative = listing?.path ?? ""
+    const root = health?.download_dir
+    const absolute = root
+      ? relative
+        ? `${root.replace(/[\/]+$/, "")}/${relative}`
+        : root
+      : relative
+
+    pickResolver.current?.(absolute)
+    pickResolver.current = null
+    setPicking(false)
+    close(false)
   }
 
   const crumbs = crumbsFor(listing?.path ?? "")
@@ -1666,6 +1739,31 @@ export function FileBrowserProvider({
 
               {/* The count, and the one thing worth stating plainly about a
                   file manager with no delete button. */}
+              {/* The picker's own bar. Only while picking, and below the
+                  list rather than beside the title, because the thing it acts
+                  on is the folder the list is showing. */}
+              {picking ? (
+                <div className="flex shrink-0 items-center justify-between gap-3 border-t px-3 py-2">
+                  <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">
+                    downloads{listing?.path ? `/${listing.path}` : ""}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => close(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="button" size="sm" onClick={confirmPick}>
+                      <RiCheckLine className="size-3.5" />
+                      Use this folder
+                    </Button>
+                  </span>
+                </div>
+              ) : null}
+
               <div className="flex shrink-0 items-center justify-between gap-3 border-t px-3 py-1.5 font-mono text-[9.5px] tracking-[0.08em] text-muted-foreground uppercase">
                 <span>
                   {loading
