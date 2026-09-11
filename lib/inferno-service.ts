@@ -822,6 +822,20 @@ export class InfernoClient {
    * "show me where this file is" - see the `/api/v1/files` route for why it
    * exists at all rather than being a desktop-only trick.
    */
+  /**
+   * A frame from a video in the download folder.
+   *
+   * Keyed on the file's size and modification time server-side, so the URL
+   * changes when the file does and the response can be cached hard. Only
+   * videos have one; anything else is an error rather than a placeholder,
+   * which is why callers ask by mime before building the URL.
+   */
+  thumbnailUrl(path: string, width = 320) {
+    const query = new URLSearchParams({ path, width: String(width) })
+
+    return this.href(`/api/v1/files/thumbnail?${query}`)
+  }
+
   listFiles(path = "") {
     const query = new URLSearchParams({ path })
 

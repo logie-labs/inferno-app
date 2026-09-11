@@ -152,6 +152,37 @@ SETTINGS: tuple[Setting, ...] = (
         runtime=False,
     ),
     Setting(
+        key="downloads.thumbnail_dir",
+        field="thumbnail_dir",
+        type="path",
+        default="",
+        group="downloads",
+        label="Video thumbnail cache",
+        description=(
+            "Where extracted video frames are kept so they are made once "
+            "rather than per request. Empty turns thumbnails off."
+        ),
+        env="THUMBNAIL_DIR",
+        runtime=False,
+    ),
+    Setting(
+        key="downloads.thumbnail_source",
+        field="thumbnail_source",
+        type="choice",
+        default="remote",
+        choices=("remote", "frame"),
+        group="downloads",
+        label="Video thumbnails from",
+        description=(
+            "'remote' uses the picture the site already published for the "
+            "video, which is chosen to represent it. 'frame' reads one out of "
+            "the file with ffmpeg instead. Remote falls back to a frame when "
+            "the file was not downloaded by this service or the site gave no "
+            "thumbnail."
+        ),
+        env="THUMBNAIL_SOURCE",
+    ),
+    Setting(
         key="downloads.max_concurrent",
         field="max_concurrent",
         type="int",
@@ -592,6 +623,10 @@ class Settings:
     #: Where the finished queue is remembered, or "" to keep it in memory only
     #: (the default, and what the desktop uses).
     state_file: str = ""
+    #: Where extracted video frames are cached, or "" for no thumbnails.
+    thumbnail_dir: str = ""
+    #: "remote" for the site's own picture, "frame" to read one from the file.
+    thumbnail_source: str = "remote"
     max_concurrent: int = 2
     job_ttl: int = 86_400
     event_history: int = 250

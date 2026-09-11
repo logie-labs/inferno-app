@@ -49,6 +49,9 @@ services:
       # Keeps the finished queue across restarts and re-pulls. Empty it to go
       # back to in-memory jobs.
       STATE_FILE: ${STATE_FILE:-/data/inferno-jobs.json}
+      # Cached video frames, so the browser shows thumbnails rather than
+      # icons. Empty it to turn them off.
+      THUMBNAIL_DIR: ${THUMBNAIL_DIR:-/data/thumbnails}
       MAX_CONCURRENT: ${MAX_CONCURRENT:-2}
       # Downloads from a datacenter IP get bot-checked by YouTube far more than
       # from a home connection. If jobs fail on a VPS but work on your desktop,

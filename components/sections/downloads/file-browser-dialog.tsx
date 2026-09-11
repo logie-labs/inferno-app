@@ -84,6 +84,7 @@ import {
   describeError,
   type FileEntry,
   type FileListing,
+  type InfernoClient,
 } from "@/lib/inferno-service"
 import { cn } from "@/lib/utils"
 
@@ -154,6 +155,34 @@ const NO_BROWSER: FileBrowserValue = {
 
 export function useFileBrowser(): FileBrowserValue {
   return useContext(FileBrowserContext) ?? NO_BROWSER
+}
+
+/**
+ * Whether to speak Finder's shortcuts or Explorer's.
+ *
+ * The two disagree about both of the keys this needs, not just their
+ * modifiers: Finder renames with Enter and has no F2 binding at all, and
+ * deletes with Cmd+Backspace because a bare Delete does nothing there. Using
+ * Windows' keys on a Mac would not be a near-miss, it would be nothing
+ * happening.
+ *
+ * `userAgent` rather than `navigator.platform`, which is deprecated, and
+ * rather than `userAgentData`, which Safari - the browser most likely to be
+ * running this on a Mac - does not implement.
+ */
+function onApplePlatform() {
+  if (typeof navigator === "undefined") {
+    return false
+  }
+
+  return /mac|iphone|ipad|ipod/i.test(navigator.userAgent)
+}
+
+/** What the menus should say the shortcut is, for this platform. */
+function shortcutHints() {
+  return onApplePlatform()
+    ? { rename: "↩", delete: "⌘⌫" }
+    : { rename: "F2", delete: "Del" }
 }
 
 /** The last segment of a path, whichever separator it arrived with. */
@@ -990,6 +1019,59 @@ export function FileBrowserProvider({
       ascending: prior.key === key ? !prior.ascending : true,
     }))
 
+  /**
+   * Delete and rename from the keyboard.
+   *
+   * On the dialog rather than on `window`, and not in an effect, because the
+   * actions it calls are ordinary functions in this render - an effect would
+   * close over whichever render last registered it and act on a stale
+   * selection. Key events from the rows and panes bubble up to here.
+   *
+   * Finder and Explorer disagree about both keys, so this follows whichever
+   * platform it is on rather than offering a superset: on a Mac, Enter renames
+   * and Cmd+Backspace deletes; elsewhere, F2 and Delete.
+   */
+  const onDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Typing is typing. The search box, the path bar and the name dialog all
+    // want these keys for themselves.
+    const target = event.target as HTMLElement | null
+    if (
+      editingPath ||
+      naming ||
+      confirm ||
+      target?.tagName === "INPUT" ||
+      target?.tagName === "TEXTAREA" ||
+      target?.isContentEditable
+    ) {
+      return
+    }
+
+    const chosen = visible.filter((entry) => selection.has(entry.path))
+    if (chosen.length === 0) {
+      return
+    }
+
+    const apple = onApplePlatform()
+    const renaming = apple ? event.key === "Enter" : event.key === "F2"
+    const deleting = apple
+      ? event.key === "Backspace" && event.metaKey
+      : event.key === "Delete"
+
+    if (renaming && chosen.length === 1) {
+      event.preventDefault()
+      renameEntry(chosen[0])
+
+      return
+    }
+
+    if (deleting) {
+      event.preventDefault()
+      // Passing the first of the selection, which `deleteEntries` then
+      // recognises as part of it and acts on the whole set.
+      deleteEntries(chosen[0])
+    }
+  }
+
   const crumbs = crumbsFor(listing?.path ?? "")
   const rootChildren = childrenByPath[""] ?? []
   const columns: [SortKey, string][] = [
@@ -1009,6 +1091,7 @@ export function FileBrowserProvider({
           // list that resizes its own dialog as you move between folders is
           // unusable. Padding drops to zero because the panes own their edges.
           className="flex h-[92dvh] w-[min(1600px,calc(100%-2rem))] max-w-none flex-col gap-0 p-0 sm:max-w-none"
+          onKeyDown={onDialogKeyDown}
         >
           <div className="flex shrink-0 flex-col border-b">
             <div className="flex items-center gap-2 px-4 pt-3 pr-12">
@@ -1400,7 +1483,6 @@ export function FileBrowserProvider({
                 ) : view === "cards" ? (
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(136px,1fr))] gap-2 p-3">
                     {visible.map((entry) => {
-                      const Icon = iconFor(entry)
                       const active = selection.has(entry.path)
 
                       return menuFor(
@@ -1419,10 +1501,20 @@ export function FileBrowserProvider({
                               : "border-transparent hover:bg-[color-mix(in_oklab,var(--foreground)_5%,transparent)]"
                           )}
                         >
-                          <Icon
-                            aria-hidden
-                            className="size-8 shrink-0 text-muted-foreground"
-                          />
+                          {/* A fixed 16:9 box whether it holds a frame or an
+                              icon, so a row of cards lines up rather than
+                              stepping up and down as thumbnails arrive. */}
+                          <span className="flex aspect-video w-full shrink-0 items-center justify-center overflow-hidden">
+                            <EntryThumbnail
+                              entry={entry}
+                              client={client}
+                              className={
+                                (entry.mime ?? "").startsWith("video/")
+                                  ? undefined
+                                  : "size-8"
+                              }
+                            />
+                          </span>
                           <span className="line-clamp-2 w-full text-[11px] leading-tight break-words">
                             {entry.name}
                           </span>
@@ -1605,6 +1697,10 @@ export function FileBrowserProvider({
                           alt={selected.name}
                           className="max-h-32 max-w-full object-contain"
                         />
+                      ) : selected.mime?.startsWith("video/") ? (
+                        <span className="flex aspect-video w-full items-center justify-center overflow-hidden">
+                          <EntryThumbnail entry={selected} client={client} />
+                        </span>
                       ) : (
                         <PreviewIcon entry={selected} />
                       )}
@@ -1807,6 +1903,50 @@ function NameDialog({
 }
 
 /**
+ * A video's own frame, falling back to its icon.
+ *
+ * Only videos have one - the service refuses anything else rather than drawing
+ * a placeholder - so the mime decides whether a thumbnail is even asked for.
+ * A failure falls back to the icon and stays there: `onError` marks it once,
+ * so a file ffmpeg cannot read is not re-requested on every render.
+ *
+ * `loading="lazy"` because a folder of fifty videos would otherwise ask for
+ * fifty frames at once, and the browser is better placed than this component
+ * to know which are actually on screen.
+ */
+function EntryThumbnail({
+  entry,
+  client,
+  className,
+}: {
+  entry: FileEntry
+  client: InfernoClient | null
+  className?: string
+}) {
+  const [failed, setFailed] = useState(false)
+  const isVideo = (entry.mime ?? "").startsWith("video/")
+
+  if (!isVideo || failed || !client || !entry.url) {
+    return createElement(iconFor(entry), {
+      "aria-hidden": true,
+      className: cn("text-muted-foreground", className),
+    })
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={client.thumbnailUrl(entry.path)}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+      className={cn("h-full w-full bg-black object-cover", className)}
+    />
+  )
+}
+
+/**
  * The right-click menu on a row, and on the empty space around them.
  *
  * Split by what you clicked, the way a real file manager is: a folder offers
@@ -1839,6 +1979,9 @@ function EntryMenu({
 }) {
   const many = entry !== null && selectionSize > 1
   const deleteLabel = many ? `Delete ${selectionSize} items` : "Delete"
+  // Named for the platform, so the menu never advertises a key that does
+  // nothing on the machine reading it.
+  const keys = shortcutHints()
 
   return (
     <ContextMenu>
@@ -1863,11 +2006,17 @@ function EntryMenu({
             <ContextMenuItem onClick={onRename} disabled={many}>
               <RiEditLine className="size-3.5" />
               Rename
+              <span className="ml-auto pl-4 font-mono text-[10px] text-muted-foreground">
+                {keys.rename}
+              </span>
             </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem onClick={onDelete} variant="destructive">
               <RiDeleteBinLine className="size-3.5" />
               {deleteLabel}
+              <span className="ml-auto pl-4 font-mono text-[10px] opacity-70">
+                {keys.delete}
+              </span>
             </ContextMenuItem>
           </>
         ) : (
@@ -1884,11 +2033,17 @@ function EntryMenu({
             <ContextMenuItem onClick={onRename} disabled={many}>
               <RiEditLine className="size-3.5" />
               Rename
+              <span className="ml-auto pl-4 font-mono text-[10px] text-muted-foreground">
+                {keys.rename}
+              </span>
             </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem onClick={onDelete} variant="destructive">
               <RiDeleteBinLine className="size-3.5" />
               {deleteLabel}
+              <span className="ml-auto pl-4 font-mono text-[10px] opacity-70">
+                {keys.delete}
+              </span>
             </ContextMenuItem>
           </>
         )}

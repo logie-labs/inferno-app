@@ -157,6 +157,7 @@ ENV INFERNO_WEB_ROOT=/app/web
 ENV DOWNLOAD_DIR=/data/downloads \
     INFERNO_CONFIG_FILE=/data/inferno-settings.json \
     STATE_FILE=/data/inferno-jobs.json \
+    THUMBNAIL_DIR=/data/thumbnails \
     PYTHONUNBUFFERED=1
 
 # Run as nobody. yt-dlp executes extractor code from the open internet, and

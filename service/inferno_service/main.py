@@ -8,17 +8,20 @@ path — anything they can do, a third-party tool can do the same way (SPEC §1)
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import mimetypes
 import os
 import platform
 import re
 import secrets
 import shutil
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Literal
 from urllib.parse import quote
 
+import httpx
 from fastapi import Body, Depends, FastAPI, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -900,6 +903,208 @@ def _install_routes(application: FastAPI) -> None:
                 ErrorCode.FILE_NOT_FOUND, "No such file.", detail={"path": path}
             )
         return _serve_file(target, request, mimetypes.guess_type(target.name)[0])
+
+    # --- video thumbnails --------------------------------------------------
+    #
+    # A frame from the file, so a folder of videos reads as videos rather than
+    # as a column of identical icons.
+    #
+    # Extracted once and kept. The cache key carries the file's size and
+    # modification time, so a file replaced under the same name produces a
+    # different key rather than a stale picture, and nothing has to be
+    # invalidated - the old entry simply stops being asked for. That is also
+    # what makes it safe to serve `immutable`: the URL changes when the file
+    # does.
+    #
+    # Off unless ``THUMBNAIL_DIR`` says where to keep them. A desktop install
+    # has no use for this - its file manager draws its own - and a service that
+    # silently started writing JPEGs somewhere would be a surprise.
+
+    #: ffmpeg is not cheap and a folder of fifty videos asks all at once. Two
+    #: at a time keeps a thumbnail request from competing with the downloads,
+    #: which are what the service is actually for.
+    thumbnail_gate = asyncio.Semaphore(2)
+
+    def _thumbnail_cache_path(
+        ctx: ServiceContext, target: Path, width: int, source: str
+    ) -> Path | None:
+        directory = ctx.settings.thumbnail_dir
+        if not directory:
+            return None
+        stat = target.stat()
+        # `source` is part of the key so switching the setting shows the other
+        # kind at once rather than whichever was cached first, and both survive
+        # switching back.
+        key = hashlib.sha256(
+            f"{target}|{stat.st_mtime_ns}|{stat.st_size}|{width}|{source}".encode()
+        ).hexdigest()
+
+        return Path(directory).expanduser() / f"{key}.jpg"
+
+    def _published_thumbnail(ctx: ServiceContext, target: Path) -> str | None:
+        """The picture the site published for whichever job produced this file.
+
+        A file on disk knows nothing about where it came from, so the job is
+        the link: its ``files`` carry the paths it wrote, and its ``video``
+        carries the thumbnail the extractor reported.
+
+        None for anything this service did not download - a file copied into
+        the folder by hand has no job, and a frame is the only thing left to
+        show for it.
+        """
+        wanted = str(target)
+        for job in ctx.jobs:
+            if any(entry.get("path") == wanted for entry in job.files):
+                thumbnail = (job.video or {}).get("thumbnail")
+
+                return str(thumbnail) if thumbnail else None
+
+        return None
+
+    async def _fetch_thumbnail(url: str, destination: Path) -> bool:
+        """Put the site's own thumbnail in the cache. False if it could not."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_suffix(".partial.jpg")
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                response = await client.get(url)
+            # Only pictures: a site answering a thumbnail URL with an HTML
+            # error page should not have that cached as one.
+            if (
+                response.status_code != 200
+                or not response.content
+                or not response.headers.get("content-type", "").startswith("image/")
+            ):
+                return False
+            staging.write_bytes(response.content)
+            os.replace(staging, destination)
+
+            return True
+        except (httpx.HTTPError, OSError):
+            staging.unlink(missing_ok=True)
+
+            return False
+
+    def _extract_frame(ffmpeg: str, source: Path, destination: Path, width: int) -> bool:
+        """One frame, scaled, written to `destination`. False if ffmpeg could not."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Written under a temporary name and moved, so a request that arrives
+        # mid-write never serves a half-decoded JPEG.
+        staging = destination.with_suffix(".partial.jpg")
+
+        # Three seconds in, because the first frame of a video is very often
+        # black or a title card. A video shorter than that yields nothing at
+        # all, so the second attempt takes whatever the first frame is.
+        for seek in ("3", None):
+            command = [ffmpeg, "-nostdin", "-loglevel", "error", "-y"]
+            if seek:
+                # Before -i: seeks by keyframe without decoding up to it, which
+                # is the difference between instant and reading the whole file.
+                command += ["-ss", seek]
+            command += [
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={width}:-2:force_original_aspect_ratio=decrease",
+                "-f",
+                "image2",
+                str(staging),
+            ]
+            try:
+                result = subprocess.run(command, capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0 and staging.is_file() and staging.stat().st_size:
+                os.replace(staging, destination)
+                return True
+
+        staging.unlink(missing_ok=True)
+        return False
+
+    @application.get(
+        "/api/v1/files/thumbnail",
+        dependencies=guarded,
+        responses={
+            **_ERROR_RESPONSES,
+            200: {"content": {"image/jpeg": {}}, "description": "A frame from the video"},
+        },
+        tags=["files"],
+        summary="A cached frame from a video in the download folder",
+    )
+    async def file_thumbnail(
+        request: Request,
+        path: str = Query(...),
+        width: int = Query(320, ge=64, le=1280),
+    ) -> Response:
+        ctx = _context(request)
+        if not ctx.settings.serve_files:
+            raise ServiceError(
+                ErrorCode.FILE_SERVING_DISABLED,
+                "File serving is disabled on this server (SERVE_FILES=false).",
+            )
+
+        target = _resolve_browse_path(ctx, path)
+        if not target.is_file():
+            raise ServiceError(ErrorCode.FILE_NOT_FOUND, "That is not here any more.")
+
+        mime = mimetypes.guess_type(target.name)[0] or ""
+        if not mime.startswith("video/"):
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "Thumbnails are only made for video files.",
+                detail={"mime": mime or None},
+            )
+
+        source = ctx.settings.thumbnail_source
+        cached = _thumbnail_cache_path(ctx, target, width, source)
+        if cached is None:
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST,
+                "Thumbnails are disabled on this server (THUMBNAIL_DIR is unset).",
+            )
+
+        headers = {"cache-control": "public, max-age=31536000, immutable"}
+        if cached.is_file():
+            return FileResponse(cached, media_type="image/jpeg", headers=headers)
+
+        async with thumbnail_gate:
+            # Re-checked inside the gate: several cards asking for the same
+            # file queue here, and the first through has already made it.
+            if cached.is_file():
+                return FileResponse(cached, media_type="image/jpeg", headers=headers)
+
+            # The site's own picture first, when that is the setting. It was
+            # chosen to represent the video; a frame three seconds in is
+            # whatever happened to be on screen.
+            if source == "remote":
+                published = _published_thumbnail(ctx, target)
+                if published and await _fetch_thumbnail(published, cached):
+                    return FileResponse(
+                        cached, media_type="image/jpeg", headers=headers
+                    )
+
+            # Either the setting asked for a frame, or there was no published
+            # picture to be had - a file this service did not download, or a
+            # site that reported none. A frame beats an icon.
+            ffmpeg = ctx.binaries.ffmpeg
+            if not ffmpeg.available or not ffmpeg.path:
+                raise ServiceError(
+                    ErrorCode.FFMPEG_MISSING,
+                    "ffmpeg did not resolve, so no frame can be read.",
+                )
+            made = await asyncio.to_thread(
+                _extract_frame, ffmpeg.path, target, cached, width
+            )
+            if not made:
+                raise ServiceError(
+                    ErrorCode.POSTPROCESSING_FAILED,
+                    "Could not make a thumbnail for this file.",
+                    detail={"name": target.name},
+                )
+
+        return FileResponse(cached, media_type="image/jpeg", headers=headers)
 
     # --- changing what is in the download folder ---------------------------
     #
