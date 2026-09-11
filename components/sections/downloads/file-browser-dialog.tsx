@@ -221,39 +221,43 @@ function crumbsFor(relative: string) {
  * folder for branches nobody opens.
  */
 function TreeBranch({
-  path,
-  name,
+  entry,
   depth,
   currentPath,
   expanded,
   childrenByPath,
   onToggle,
   onOpen,
+  renderMenu,
 }: {
-  path: string
-  name: string
+  entry: FileEntry
   depth: number
   currentPath: string
   expanded: Set<string>
   childrenByPath: Record<string, FileEntry[]>
   onToggle: (path: string) => void
   onOpen: (path: string) => void
+  /** Wraps a branch row in the same menu the content pane's rows get. */
+  renderMenu: (entry: FileEntry, node: React.ReactElement) => React.ReactElement
 }) {
+  const { path, name } = entry
   const isOpen = expanded.has(path)
   const branchChildren = childrenByPath[path]
   const isCurrent = currentPath === path
 
   return (
     <li>
-      <div
-        className={cn(
-          "flex items-center gap-1 py-1 pr-2 text-xs transition-colors",
-          isCurrent
-            ? "bg-[color-mix(in_oklab,var(--foreground)_10%,transparent)] text-foreground"
-            : "text-muted-foreground hover:text-foreground"
-        )}
-        style={{ paddingLeft: `${depth * 12 + 6}px` }}
-      >
+      {renderMenu(
+        entry,
+        <div
+          className={cn(
+            "flex items-center gap-1 py-1 pr-2 text-xs transition-colors",
+            isCurrent
+              ? "bg-[color-mix(in_oklab,var(--foreground)_10%,transparent)] text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+          style={{ paddingLeft: `${depth * 12 + 6}px` }}
+        >
         <button
           type="button"
           aria-label={isOpen ? `Collapse ${name}` : `Expand ${name}`}
@@ -275,14 +279,15 @@ function TreeBranch({
         ) : (
           <RiFolder3Line aria-hidden className="size-3.5 shrink-0" />
         )}
-        <button
-          type="button"
-          onClick={() => onOpen(path)}
-          className="min-w-0 flex-1 truncate text-left"
-        >
-          {name}
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => onOpen(path)}
+            className="min-w-0 flex-1 truncate text-left"
+          >
+            {name}
+          </button>
+        </div>
+      )}
       {isOpen ? (
         <ul>
           {branchChildren === undefined ? (
@@ -303,14 +308,14 @@ function TreeBranch({
             branchChildren.map((child) => (
               <TreeBranch
                 key={child.path}
-                path={child.path}
-                name={child.name}
+                entry={child}
                 depth={depth + 1}
                 currentPath={currentPath}
                 expanded={expanded}
                 childrenByPath={childrenByPath}
                 onToggle={onToggle}
                 onOpen={onOpen}
+                renderMenu={renderMenu}
               />
             ))
           )}
@@ -810,27 +815,91 @@ export function FileBrowserProvider({
   /** Everything currently selected, as entries rather than paths. */
   const selectedEntries = visible.filter((entry) => selection.has(entry.path))
 
-  const runFileAction = async (what: string, action: () => Promise<unknown>) => {
+  /** Re-read one folder into the tree, without navigating to it. */
+  const refreshBranch = async (path: string) => {
+    if (!client) {
+      return
+    }
+    const result = await client.listFiles(path)
+    setChildrenByPath((prior) => ({
+      ...prior,
+      [result.path]: result.entries.filter((e) => e.type === "directory"),
+    }))
+  }
+
+  /**
+   * Run a write, then re-read whatever it changed.
+   *
+   * `branch` is the folder the change happened in, which is the current one
+   * for anything done in the content pane and some other folder for anything
+   * done from the tree. Refreshed separately so the tree updates too - acting
+   * on a folder you are not standing in is the whole point of having a tree.
+   */
+  const runFileAction = async (
+    what: string,
+    action: () => Promise<unknown>,
+    branch?: string
+  ) => {
     try {
       await action()
       await refresh()
+      if (branch !== undefined && branch !== (listing?.path ?? "")) {
+        await refreshBranch(branch)
+      }
     } catch (cause) {
       toast.error(`Could not ${what}`, { description: describeError(cause) })
     }
   }
 
-  const createFolder = () => {
+  /**
+   * A name nothing in this folder already has.
+   *
+   * "New folder", then "New folder (2)" and so on, which is what Explorer
+   * does. Without it, making two in a row means typing over a name the server
+   * is about to reject - the duplicate check there is the backstop, not the
+   * interaction.
+   *
+   * Only the folder being looked at can be checked. Creating from the tree
+   * into some other folder falls back to the plain name and lets the server
+   * answer, which is the honest limit of what the client knows.
+   */
+  const untakenFolderName = (parent: string) => {
+    if (parent !== (listing?.path ?? "")) {
+      return "New folder"
+    }
+    const taken = new Set(
+      (listing?.entries ?? []).map((entry) => entry.name.toLowerCase())
+    )
+    if (!taken.has("new folder")) {
+      return "New folder"
+    }
+    let index = 2
+    while (taken.has(`new folder (${index})`)) {
+      index += 1
+    }
+
+    return `New folder (${index})`
+  }
+
+  const createFolder = (parent: string = listing?.path ?? "") => {
     if (!client) {
       return
     }
+    const suggestion = untakenFolderName(parent)
     setNaming({
       title: "New folder",
       label: "Name",
       confirmLabel: "Create",
-      initial: "",
+      // Pre-filled and selected, so Enter alone makes "New folder" and typing
+      // replaces it. Submitting it empty means the same thing rather than
+      // nothing - see `NameDialog`.
+      initial: suggestion,
+      fallback: suggestion,
       run: (name) =>
-        void runFileAction("create the folder", () =>
-          client.createFolder(listing?.path ?? "", name)
+        void runFileAction(
+          "create the folder",
+          () => client.createFolder(parent, name),
+          parent
         ),
     })
   }
@@ -848,7 +917,11 @@ export function FileBrowserProvider({
         if (name === entry.name) {
           return
         }
-        void runFileAction("rename", () => client.renameFile(entry.path, name))
+        void runFileAction(
+          "rename",
+          () => client.renameFile(entry.path, name),
+          parentOf(entry.path)
+        )
       },
     })
   }
@@ -877,12 +950,16 @@ export function FileBrowserProvider({
       confirmLabel: "Delete",
       destructive: true,
       run: () =>
-        void runFileAction("delete", async () => {
-          for (const target of targets) {
-            await client.deleteFile(target.path)
-          }
-          setSelection(new Set())
-        }),
+        void runFileAction(
+          "delete",
+          async () => {
+            for (const target of targets) {
+              await client.deleteFile(target.path)
+            }
+            setSelection(new Set())
+          },
+          parentOf(targets[0].path)
+        ),
     })
   }
 
@@ -896,7 +973,12 @@ export function FileBrowserProvider({
       onReveal={() => navigate(entry.path, null)}
       onRename={() => renameEntry(entry)}
       onDelete={() => deleteEntries(entry)}
-      onNewFolder={createFolder}
+      // A folder's own menu creates inside it; a file's creates beside it.
+      onNewFolder={() =>
+        createFolder(
+          entry.type === "directory" ? entry.path : (listing?.path ?? "")
+        )
+      }
     >
       {node}
     </EntryMenu>
@@ -1170,35 +1252,52 @@ export function FileBrowserProvider({
               <ScrollArea className="h-full">
                 <ul className="py-2">
                   <li>
-                    <div
-                      className={cn(
-                        "flex items-center gap-1.5 py-1 pr-2 pl-1.5 text-xs transition-colors",
-                        listing?.path === ""
-                          ? "bg-[color-mix(in_oklab,var(--foreground)_10%,transparent)] text-foreground"
-                          : "text-muted-foreground hover:text-foreground"
-                      )}
+                    {/* The root gets the background menu rather than a
+                        folder's: it cannot be renamed or deleted, so the only
+                        thing it can offer is making something inside it. */}
+                    <EntryMenu
+                      entry={null}
+                      selectionSize={selection.size}
+                      onOpen={() => {}}
+                      onDownload={() => {}}
+                      onReveal={() => {}}
+                      onRename={() => {}}
+                      onDelete={() => {}}
+                      onNewFolder={() => createFolder("")}
                     >
-                      <RiHome3Line aria-hidden className="size-3.5 shrink-0" />
-                      <button
-                        type="button"
-                        onClick={() => navigate("", null)}
-                        className="min-w-0 flex-1 truncate text-left"
+                      <div
+                        className={cn(
+                          "flex items-center gap-1.5 py-1 pr-2 pl-1.5 text-xs transition-colors",
+                          listing?.path === ""
+                            ? "bg-[color-mix(in_oklab,var(--foreground)_10%,transparent)] text-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
                       >
-                        downloads
-                      </button>
-                    </div>
+                        <RiHome3Line
+                          aria-hidden
+                          className="size-3.5 shrink-0"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => navigate("", null)}
+                          className="min-w-0 flex-1 truncate text-left"
+                        >
+                          downloads
+                        </button>
+                      </div>
+                    </EntryMenu>
                   </li>
                   {rootChildren.map((entry) => (
                     <TreeBranch
                       key={entry.path}
-                      path={entry.path}
-                      name={entry.name}
+                      entry={entry}
                       depth={1}
                       currentPath={listing?.path ?? ""}
                       expanded={expanded}
                       childrenByPath={childrenByPath}
                       onToggle={toggleBranch}
                       onOpen={(path) => navigate(path, null)}
+                      renderMenu={menuFor}
                     />
                   ))}
                 </ul>
@@ -1219,7 +1318,7 @@ export function FileBrowserProvider({
                   onReveal={() => {}}
                   onRename={() => {}}
                   onDelete={() => {}}
-                  onNewFolder={createFolder}
+                  onNewFolder={() => createFolder()}
                 >
                 <div
                   ref={contentRef}
@@ -1271,7 +1370,7 @@ export function FileBrowserProvider({
                           type="button"
                           variant="outline"
                           size="sm"
-                          onClick={createFolder}
+                          onClick={() => createFolder()}
                         >
                           <RiFolderAddLine className="size-3.5" />
                           New folder
@@ -1586,6 +1685,15 @@ type NameRequest = {
   label: string
   confirmLabel: string
   initial: string
+  /**
+   * Used when the field is submitted empty.
+   *
+   * A new folder has a sensible name whether or not anyone types one, so
+   * clearing the field and pressing Enter makes "New folder" rather than
+   * nothing. A rename has no such default and leaves this unset, which
+   * disables the button instead.
+   */
+  fallback?: string
   run: (name: string) => void
 }
 
@@ -1624,6 +1732,8 @@ function NameDialog({
   }, [])
 
   const trimmed = value.trim()
+  // What pressing Enter would actually create.
+  const effective = trimmed || request.fallback || ""
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
@@ -1635,10 +1745,10 @@ function NameDialog({
           className="flex flex-col gap-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if (!trimmed) {
+            if (!effective) {
               return
             }
-            request.run(trimmed)
+            request.run(effective)
             onOpenChange(false)
           }}
         >
@@ -1667,7 +1777,7 @@ function NameDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" size="sm" disabled={!trimmed}>
+            <Button type="submit" size="sm" disabled={!effective}>
               {request.confirmLabel}
             </Button>
           </DialogFooter>
