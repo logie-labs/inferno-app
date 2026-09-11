@@ -1530,7 +1530,10 @@ export function FileBrowserProvider({
                 ) : (
                   <table className="w-full text-left text-xs">
                     <thead className="sticky top-0 bg-popover">
-                      <tr className="border-b">
+                      {/* The same transparent 2px the rows carry, so the
+                          header's columns line up with theirs rather than
+                          sitting two pixels to their left. */}
+                      <tr className="border-b [&>th:first-child]:border-l-2 [&>th:first-child]:border-l-transparent">
                         {columns.map(([key, label]) => (
                           <th
                             key={key}
@@ -1577,10 +1580,15 @@ export function FileBrowserProvider({
                             onClick={(event) => selectEntry(entry, event)}
                             onDoubleClick={() => openEntry(entry)}
                             className={cn(
-                              "border-b border-border/50 transition-colors",
+                              // The marker border is always there, only
+                              // sometimes coloured. Adding it on selection
+                              // alone made every name jump two pixels right
+                              // as you clicked it.
+                              "h-9 border-b border-border/50 transition-colors",
+                              "[&>td:first-child]:border-l-2",
                               active
-                                ? "bg-primary/20 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-primary"
-                                : "hover:bg-[color-mix(in_oklab,var(--foreground)_4%,transparent)]"
+                                ? "bg-primary/20 [&>td:first-child]:border-l-primary"
+                                : "[&>td:first-child]:border-l-transparent hover:bg-[color-mix(in_oklab,var(--foreground)_4%,transparent)]"
                             )}
                           >
                             <td className="px-3 py-1.5">
@@ -1610,7 +1618,12 @@ export function FileBrowserProvider({
                             <td className="px-3 py-1.5 font-mono text-[10px] text-muted-foreground">
                               {formatWhen(entry.modified)}
                             </td>
-                            <td className="px-3 py-1.5">
+                            {/* `py-0`: the buttons are taller than the text
+                                beside them, so with padding a file's row came
+                                out taller than a folder's - which has no
+                                buttons at all. The row's own height governs
+                                both instead. */}
+                            <td className="px-3 py-0">
                               {entry.type === "file" ? (
                                 <span className="flex items-center justify-end gap-1">
                                   <Button

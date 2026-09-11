@@ -148,15 +148,18 @@ function detailFor(tracker: JobTracker) {
   const stage = stageOf(job)
 
   if (stage === "downloading") {
+    // How far through, and nothing else.
+    //
+    // The rate and the eta both used to sit on the end of this line, and both
+    // are reported by yt-dlp on some ticks and not others - so they blinked in
+    // and out several times a second. The size does not: it is two running
+    // totals, and it is the thing the line is actually for.
+    //
+    // `tracker.speed` and `tracker.eta` are still tracked; nothing renders
+    // them.
     const size = total
       ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
       : formatBytes(downloaded)
-    const rate = tracker.speed ? ` · ${formatBytes(tracker.speed)}/s` : ""
-    // No eta. yt-dlp reports it only on some ticks, so it blinked in and out
-    // of the end of this line several times a second - and unlike the size and
-    // the rate, it is a guess about the future rather than a measurement of
-    // what has happened, which makes it the one part not worth the movement.
-    // `tracker.eta` is still tracked; nothing renders it.
     const streams = segmentsFor(tracker).filter((segment) =>
       segment.key.startsWith("stream-")
     )
@@ -165,7 +168,7 @@ function detailFor(tracker: JobTracker) {
     const which =
       streams.length > 1 && active >= 0 ? `${streams[active].label} · ` : ""
 
-    return `${which}${size}${rate}`
+    return `${which}${size}`
   }
 
   if (stage === "processing") {
