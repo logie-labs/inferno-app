@@ -1250,7 +1250,24 @@ export function FileBrowserProvider({
           <div className="flex min-h-0 flex-1">
             <aside className="hidden w-52 shrink-0 border-r sm:block">
               <ScrollArea className="h-full">
-                <ul className="py-2">
+                {/* The whole pane answers a right-click, not only the rows.
+                    A tree is mostly empty space, and a menu that appears on
+                    the four folders but not the gap under them reads as
+                    broken rather than as scoped. `min-h-full` is what makes
+                    the surface the height of the pane instead of the height
+                    of its contents. */}
+                <EntryMenu
+                  entry={null}
+                  selectionSize={selection.size}
+                  onOpen={() => {}}
+                  onDownload={() => {}}
+                  onReveal={() => {}}
+                  onRename={() => {}}
+                  onDelete={() => {}}
+                  onNewFolder={() => createFolder("")}
+                >
+                  <div className="min-h-full py-2">
+                <ul>
                   <li>
                     {/* The root gets the background menu rather than a
                         folder's: it cannot be renamed or deleted, so the only
@@ -1301,6 +1318,8 @@ export function FileBrowserProvider({
                     />
                   ))}
                 </ul>
+                  </div>
+                </EntryMenu>
               </ScrollArea>
             </aside>
 
