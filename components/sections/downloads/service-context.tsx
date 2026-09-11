@@ -62,6 +62,13 @@ type ServiceContextValue = {
   entryFor: (jobId: string) => LibraryEntry | undefined
   /** Re-read the job list, for when a file changed outside the socket. */
   refreshJobs: () => Promise<void>
+  /**
+   * The last `files.changed` the service sent, or null before any.
+   *
+   * `paths` are folders relative to the download root. A view showing one of
+   * them should re-read; a view showing another need not.
+   */
+  filesChanged: { at: number; paths: string[] } | null
   /** Replace one entry after a verify or a relocate. */
   updateEntry: (entry: LibraryEntry) => void
   /** Everything the library remembers, newest first. */
@@ -228,6 +235,18 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<ConnectionState>("connecting")
   const [problem, setProblem] = useState<string | null>(null)
   const [health, setHealth] = useState<Health | null>(null)
+  /**
+   * The last folder change the service announced.
+   *
+   * A value rather than a callback registry: one socket already exists, and a
+   * consumer that cares re-reads when this changes. `at` is the event's `seq`,
+   * which is monotonic per server, so it is never equal twice and a re-read is
+   * never missed or repeated.
+   */
+  const [filesChanged, setFilesChanged] = useState<{
+    at: number
+    paths: string[]
+  } | null>(null)
   // Keyed by job so a queue row can find its record without a scan.
   const [entries, setEntries] = useState<Map<string, LibraryEntry>>(new Map())
   // Trackers accumulate across frames and are mutated in place, so the map
@@ -553,6 +572,18 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
         if (frame.type === "heartbeat" || frame.type === "pong") {
           return
         }
+
+        // A folder changed. Carries no job, so it has to be handled before the
+        // job_id guard below - and it is only a nudge: the listing is one
+        // cheap request, and whoever is showing one of these folders re-reads
+        // it themselves rather than this trying to patch a list it cannot see.
+        if (frame.type === "files.changed") {
+          const paths = Array.isArray(data.paths) ? (data.paths as string[]) : []
+          setFilesChanged({ at: frame.seq, paths })
+
+          return
+        }
+
         if (!frame.job_id) {
           return
         }
@@ -720,6 +751,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
       health,
       entryFor,
       refreshJobs,
+      filesChanged,
       updateEntry,
       library,
       forget,
@@ -737,6 +769,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
       health,
       entryFor,
       refreshJobs,
+      filesChanged,
       updateEntry,
       library,
       forget,

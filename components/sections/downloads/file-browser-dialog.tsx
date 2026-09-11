@@ -376,7 +376,7 @@ export function FileBrowserProvider({
 }: {
   children: React.ReactNode
 }) {
-  const { client, health, refreshJobs } = useInfernoService()
+  const { client, health, refreshJobs, filesChanged } = useInfernoService()
 
   const [state, setState] = useState<BrowserState | null>(null)
   const [listing, setListing] = useState<FileListing | null>(null)
@@ -547,6 +547,66 @@ export function FileBrowserProvider({
       cancelled = true
     }
   }, [client, state])
+
+  /**
+   * Re-read when the service says this folder changed.
+   *
+   * The socket is already open for the queue, so live updates cost one event
+   * and one conditional listing rather than a poll - a browser left open on a
+   * folder asks for nothing until something actually happens to it.
+   *
+   * Scoped to the folder on screen and its expanded branches: a download
+   * finishing in `Music` is no reason to re-read `Clips`. The whole tree is
+   * not refreshed either, only the branches that were told they changed.
+   */
+  useEffect(() => {
+    if (!filesChanged || !state || !client) {
+      return
+    }
+
+    const here = listing?.path ?? null
+    let cancelled = false
+
+    for (const path of filesChanged.paths) {
+      if (here !== null && path === here) {
+        void client
+          .listFiles(here)
+          .then((next) => {
+            if (!cancelled) {
+              setListing(next)
+            }
+          })
+          .catch(() => {
+            // A folder that has just been deleted from under us stops
+            // listing. The next navigation reports it properly; re-reading is
+            // not the place to raise it.
+          })
+      }
+      if (childrenByPath[path] !== undefined) {
+        void client
+          .listFiles(path)
+          .then((result) => {
+            if (!cancelled) {
+              setChildrenByPath((prior) => ({
+                ...prior,
+                [result.path]: result.entries.filter(
+                  (entry) => entry.type === "directory"
+                ),
+              }))
+            }
+          })
+          .catch(() => {})
+      }
+    }
+
+    return () => {
+      cancelled = true
+    }
+    // `listing` and `childrenByPath` are read, not depended on: this must run
+    // when an event arrives, not every time a listing lands - which is what
+    // the event causes, and would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesChanged, client, state])
 
   const toggleBranch = useCallback(
     (path: string) => {

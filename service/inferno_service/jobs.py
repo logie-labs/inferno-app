@@ -762,6 +762,27 @@ class JobManager:
         if error is not None:
             data["error"] = error
         self._events.publish(_STATUS_EVENT[status], job.job_id, data)
+
+        # A finished download is a folder that changed, and a file browser
+        # showing it should not have to be told to look again. Only on
+        # completion: a job that failed or was cancelled published nothing, and
+        # its staging folder is not one anybody is looking at.
+        if status == JobStatus.COMPLETED and job.published:
+            root = self._settings.resolved_download_dir()
+            folders: list[str] = []
+            for path in job.published:
+                try:
+                    relative = path.parent.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                value = "" if relative == "." else relative
+                if value not in folders:
+                    folders.append(value)
+            if folders:
+                self._events.publish(
+                    EventType.FILES_CHANGED, None, {"paths": folders}
+                )
+
         # The only moment a job's recorded form changes. Everything before this
         # is in flight and deliberately not written.
         self._persist()

@@ -744,6 +744,11 @@ def _install_routes(application: FastAPI) -> None:
     ) -> Response:
         ctx = _context(request)
         await ctx.jobs.delete(job_id, keep_files=keep_files)
+        # Removing a job takes its files with it unless asked not to, so the
+        # folder they were in has changed.
+        if not keep_files:
+            _announce_files(ctx, ctx.settings.resolved_download_dir())
+
         return Response(status_code=204)
 
     @application.get(
@@ -1124,6 +1129,25 @@ def _install_routes(application: FastAPI) -> None:
     # is the same state as someone deleting it from the host - `exists` on the
     # job's files is what reports it.
 
+    def _announce_files(ctx: ServiceContext, *paths: Path) -> None:
+        """Tell every connected client which folders just changed.
+
+        Relative to the download root, because that is the vocabulary the
+        listing endpoint and its clients already use. Duplicates are collapsed:
+        a rename inside one folder touches it once, not twice.
+        """
+        root = ctx.settings.resolved_download_dir()
+        relative: list[str] = []
+        for path in paths:
+            try:
+                value = "" if path == root else path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if value not in relative:
+                relative.append(value)
+
+        ctx.events.publish(EventType.FILES_CHANGED, None, {"paths": relative})
+
     def _safe_name(name: str) -> str:
         cleaned = name.strip().strip("/")
         if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned:
@@ -1163,7 +1187,9 @@ def _install_routes(application: FastAPI) -> None:
                 ErrorCode.DISK_ERROR, f"Could not create the folder: {error}"
             ) from error
 
+        _announce_files(ctx, parent)
         root = ctx.settings.resolved_download_dir()
+
         return _browse_entry(root, target)
 
     @application.post(
@@ -1201,6 +1227,8 @@ def _install_routes(application: FastAPI) -> None:
                 ErrorCode.DISK_ERROR, f"Could not rename: {error}"
             ) from error
 
+        _announce_files(ctx, target.parent, destination.parent)
+
         return _browse_entry(root, destination)
 
     @application.delete(
@@ -1233,6 +1261,8 @@ def _install_routes(application: FastAPI) -> None:
             raise ServiceError(
                 ErrorCode.DISK_ERROR, f"Could not delete: {error}"
             ) from error
+
+        _announce_files(ctx, target.parent)
 
         return Response(status_code=204)
 

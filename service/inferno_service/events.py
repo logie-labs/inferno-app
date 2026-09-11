@@ -63,6 +63,21 @@ class EventType:
     PONG = "pong"
     #: Settings changed. Every connected client converges without polling.
     SETTINGS_CHANGED = "settings.changed"
+    #: Something in the download folder is not what it was.
+    #:
+    #: Carries ``paths``: the directories affected, relative to the download
+    #: root, so a client showing one of them knows to re-read and a client
+    #: showing another knows it need not. Deliberately not the change itself -
+    #: a listing is one cheap request, and an event that tried to describe the
+    #: change would have to stay correct about renames, merges and partials,
+    #: which is a second source of truth to keep in step with the first.
+    #:
+    #: Published where the service knows it has altered the folder - a job
+    #: publishing its files, and the three write routes - and nowhere else.
+    #: Nothing watches the filesystem: a change made by something other than
+    #: this service is found when a client next looks, which is the same
+    #: guarantee a poll would give without the cost of one.
+    FILES_CHANGED = "files.changed"
 
 
 #: Frames generated per-socket rather than broadcast. They carry the bus's
