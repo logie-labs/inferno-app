@@ -191,7 +191,7 @@ function QueueRowItem({
   onShowDetails: (video: VideoInfo) => void
   onConfirm: (request: ConfirmRequest) => void
 }) {
-  const { cancel, remove, retry, entryFor, destroy, client, health } =
+  const { cancel, remove, retry, entryFor, destroy, client, health, refreshJobs } =
     useInfernoService()
   const fileBrowser = useFileBrowser()
   const { job } = tracker
@@ -247,6 +247,12 @@ function QueueRowItem({
    */
   const checkThenRun = async (run: () => void) => {
     if (!entry) {
+      // No library to ask, so ask the service: it reports `exists` per file as
+      // it answers, and this is the moment that answer starts to matter. The
+      // row re-renders with it before the action runs.
+      if (!capabilities.localFilesystem) {
+        await refreshJobs()
+      }
       run()
 
       return

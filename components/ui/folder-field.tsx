@@ -45,7 +45,7 @@ const TONE: Record<
 > = {
   ok: { className: "text-muted-foreground", icon: RiCheckLine },
   will_create: {
-    className: "text-sky-700 dark:text-sky-400",
+    className: "text-amber-700 dark:text-amber-400",
     icon: RiFolderAddLine,
   },
   not_a_directory: { className: "text-destructive", icon: RiAlertLine },

@@ -60,6 +60,8 @@ type ServiceContextValue = {
   jobs: JobTracker[]
   /** The library's record for a job, once it has one. */
   entryFor: (jobId: string) => LibraryEntry | undefined
+  /** Re-read the job list, for when a file changed outside the socket. */
+  refreshJobs: () => Promise<void>
   /** Replace one entry after a verify or a relocate. */
   updateEntry: (entry: LibraryEntry) => void
   /** Everything the library remembers, newest first. */
@@ -296,6 +298,35 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const entryFor = useCallback((jobId: string) => entries.get(jobId), [entries])
+
+  /**
+   * Re-read the job list from the service.
+   *
+   * The socket reports what *happens to a job* - queued, progress, finished -
+   * and nothing happens to a job when someone deletes the file it produced.
+   * So the queue kept offering Open and Download for files that were gone:
+   * `files[].exists` is computed by the service as it answers, and the client
+   * was still holding the answer from when the job finished.
+   *
+   * Called where something is known to have changed on disk rather than on a
+   * timer - the file browser after a delete, and a row's menu as it opens,
+   * which is the moment its answer starts to matter.
+   */
+  const refreshJobs = useCallback(async () => {
+    if (!client) {
+      return
+    }
+    try {
+      const listing = await client.listJobs()
+      for (const job of listing.jobs) {
+        upsert(job)
+      }
+      publish()
+    } catch {
+      // The socket remains the source of truth; a failed re-read just means
+      // the list is as stale as it already was.
+    }
+  }, [client, upsert, publish])
 
   const forget = useCallback(async (entry: LibraryEntry) => {
     await forgetEntry(entry.id)
@@ -688,6 +719,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
       client,
       health,
       entryFor,
+      refreshJobs,
       updateEntry,
       library,
       forget,
@@ -704,6 +736,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
       client,
       health,
       entryFor,
+      refreshJobs,
       updateEntry,
       library,
       forget,

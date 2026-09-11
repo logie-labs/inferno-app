@@ -376,7 +376,7 @@ export function FileBrowserProvider({
 }: {
   children: React.ReactNode
 }) {
-  const { client, health } = useInfernoService()
+  const { client, health, refreshJobs } = useInfernoService()
 
   const [state, setState] = useState<BrowserState | null>(null)
   const [listing, setListing] = useState<FileListing | null>(null)
@@ -921,6 +921,10 @@ export function FileBrowserProvider({
       if (branch !== undefined && branch !== (listing?.path ?? "")) {
         await refreshBranch(branch)
       }
+      // Nothing happens to a *job* when its file is deleted, so the socket
+      // says nothing and the queue would go on offering Open for a file that
+      // is gone. This is the moment it is known to be wrong.
+      await refreshJobs()
     } catch (cause) {
       toast.error(`Could not ${what}`, { description: describeError(cause) })
     }

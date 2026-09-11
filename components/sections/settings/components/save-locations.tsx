@@ -47,7 +47,7 @@ const TEMPORARY = "temporary"
  */
 const STATUS_TONE: Record<DirectoryCheck["status"], string> = {
   ok: "text-muted-foreground",
-  will_create: "text-sky-700 dark:text-sky-400",
+  will_create: "text-amber-700 dark:text-amber-400",
   not_a_directory: "text-destructive",
   unwritable: "text-destructive",
   no_parent: "text-destructive",
