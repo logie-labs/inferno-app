@@ -148,23 +148,29 @@ function detailFor(tracker: JobTracker) {
   const stage = stageOf(job)
 
   if (stage === "downloading") {
-    const size = total
-      ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
-      : formatBytes(downloaded)
-    const rate = tracker.speed ? ` · ${formatBytes(tracker.speed)}/s` : ""
-    const eta =
-      tracker.eta !== null && tracker.eta !== undefined
-        ? ` · ${tracker.eta}s left`
-        : ""
-    // Which of the two transfers this is, when there are two.
+    // How much has arrived, and nothing that might not be there next tick.
+    //
+    // This line used to read `12.3 MB / 45.0 MB · 2.1 MB/s · 18s left`, and
+    // all three of those trailing parts come from fields yt-dlp reports only
+    // on some ticks - the total is an estimate that arrives late on a merge,
+    // and speed and eta are both absent between fragments. Each was written
+    // conditionally, so the line did not degrade gracefully: it flipped
+    // between the long form and a bare size several times a second, which is
+    // harder to read than either and reads as a fault rather than as missing
+    // data.
+    //
+    // The bar above already shows how far along it is, so the number that has
+    // to be here is the one that only ever goes up.
     const streams = segmentsFor(tracker).filter((segment) =>
       segment.key.startsWith("stream-")
     )
     const active = streams.findIndex((segment) => (segment.value ?? 0) < 100)
+    // Which of the two transfers this is, when there are two. Not an estimate
+    // and not intermittent, so it stays.
     const which =
       streams.length > 1 && active >= 0 ? `${streams[active].label} · ` : ""
 
-    return `${which}${size}${rate}${eta}`
+    return `${which}${formatBytes(downloaded)}`
   }
 
   if (stage === "processing") {
