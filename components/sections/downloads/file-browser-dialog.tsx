@@ -1119,19 +1119,32 @@ export function FileBrowserProvider({
   }
 
   /**
-   * Answer the picker with the folder currently open.
+   * The folder the picker would answer with: the one selected, or the one open.
    *
-   * Confirming *where you are* rather than what is highlighted, which is how
-   * every "choose folder" dialog works: you navigate into the folder you mean
-   * and say so. It also sidesteps a question the other form raises - what it
-   * means to have three folders selected when the caller wants one.
+   * Selecting a folder and being handed its parent is the version of this that
+   * feels broken, so a single selected folder wins. Anything else - nothing
+   * selected, a file selected, several things selected - falls back to where
+   * you are, which is the other way these dialogs are used and the only
+   * sensible reading when the selection is not one folder.
+   */
+  const pickTarget = (() => {
+    const chosen = visible.filter((entry) => selection.has(entry.path))
+    if (chosen.length === 1 && chosen[0].type === "directory") {
+      return chosen[0].path
+    }
+
+    return listing?.path ?? ""
+  })()
+
+  /**
+   * Answer the picker.
    *
    * Absolute, built from the root `/health` reports. Falls back to the
    * relative path if the service has not answered yet, which is better than
    * handing back something that looks absolute and is not.
    */
   const confirmPick = () => {
-    const relative = listing?.path ?? ""
+    const relative = pickTarget
     const root = health?.download_dir
     const absolute = root
       ? relative
@@ -1744,8 +1757,12 @@ export function FileBrowserProvider({
                   on is the folder the list is showing. */}
               {picking ? (
                 <div className="flex shrink-0 items-center justify-between gap-3 border-t px-3 py-2">
+                  {/* The folder it will actually answer with, not the one you
+                      are standing in - those differ the moment something is
+                      selected, and the bar saying one while the button does
+                      the other is how a picker loses trust. */}
                   <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">
-                    downloads{listing?.path ? `/${listing.path}` : ""}
+                    downloads{pickTarget ? `/${pickTarget}` : ""}
                   </span>
                   <span className="flex shrink-0 items-center gap-2">
                     <Button

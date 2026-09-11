@@ -7,19 +7,11 @@ import {
   RiCheckboxCircleFill,
   RiCloseLine,
   RiFolderOpenLine,
-  RiHardDrive2Line,
-  RiTimeLine,
 } from "@remixicon/react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { FolderField } from "@/components/ui/folder-field"
 import {
   checkDirectory,
@@ -343,9 +335,6 @@ export function SaveLocations({
 
   // Only the presets not already on the list: adding one twice does nothing,
   // so offering it twice is offering a control that cannot work.
-  const offerable = known.filter(
-    (folder) => !folders.some((entry) => entry.path === folder.path)
-  )
 
   // A path typed elsewhere - the configure panel binds the same setting - is
   // shown rather than silently unselected, with the means to keep it.
@@ -404,60 +393,31 @@ export function SaveLocations({
         />
       ))}
 
-      {/* Two ways in, because they answer different questions: the menu is
-          for "the usual place", the field for "this exact one". */}
-      <div className="flex items-start gap-1 border border-dashed p-3">
+      {/* One way in: type a path or choose a folder, then add it. The presets
+          menu that used to sit beside this offered the OS's own folders -
+          Documents, Videos and so on - which only exist on a desktop, and
+          having two controls for "add a folder" made neither obviously the
+          one to use. */}
+      <div className="flex items-start gap-2 border border-dashed p-3">
         <FolderField
           value={draft}
           onValueChange={setDraft}
           placeholder="Add another folder"
           emptyHint="Type a path or choose a folder, then add it to the list."
           className="min-w-0 flex-1"
-          action={
-            <Button
-              variant="ghost"
-              size="icon"
-              className="shrink-0"
-              disabled={!draft.trim()}
-              title="Add this folder to the list"
-              aria-label="Add this folder to the list"
-              onClick={() => add({ source: "custom", path: draft })}
-            >
-              <RiAddLine />
-            </Button>
-          }
         />
 
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="outline"
-                size="sm"
-                className="shrink-0"
-                disabled={offerable.length === 0}
-              >
-                <RiHardDrive2Line data-icon="inline-start" />
-                Presets
-              </Button>
-            }
-          />
-          <DropdownMenuContent align="end" className="w-64">
-            {offerable.map((folder) => (
-              <DropdownMenuItem
-                key={folder.id}
-                onClick={() => add({ source: folder.id, path: folder.path })}
-              >
-                {folder.id === TEMPORARY ? (
-                  <RiTimeLine data-icon="inline-start" />
-                ) : (
-                  <RiFolderOpenLine data-icon="inline-start" />
-                )}
-                <span className="min-w-0 flex-1 truncate">{folder.label}</span>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0"
+          disabled={!draft.trim()}
+          title="Add this folder to the list"
+          onClick={() => add({ source: "custom", path: draft })}
+        >
+          <RiAddLine data-icon="inline-start" />
+          Add
+        </Button>
       </div>
     </div>
   )

@@ -860,7 +860,7 @@ export class InfernoClient {
 
       return {
         status: "ok",
-        message: "This folder is here.",
+        message: "Downloads will be saved here.",
         existing_parent: null,
       }
     } catch (cause) {
@@ -875,13 +875,13 @@ export class InfernoClient {
 
           return {
             status: "will_create",
-            message: "This folder will be made when something is saved here.",
+            message: "This folder does not exist yet. It will be created.",
             existing_parent: parent,
           }
         } catch {
           return {
             status: "no_parent",
-            message: "Nothing above this folder exists either.",
+            message: "The folder above this one does not exist either, so it cannot be created.",
             existing_parent: null,
           }
         }
