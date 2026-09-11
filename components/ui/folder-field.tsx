@@ -10,6 +10,7 @@ import {
 } from "@remixicon/react"
 
 import { useFileBrowser } from "@/components/sections/downloads/file-browser-dialog"
+import { useInfernoService } from "@/components/sections/downloads/service-context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -93,6 +94,7 @@ export function FolderField({
   className?: string
 }) {
   const fileBrowser = useFileBrowser()
+  const { client } = useInfernoService()
   const [check, setCheck] = useState<{
     path: string
     result: DirectoryCheck
@@ -109,7 +111,14 @@ export function FolderField({
 
     let live = true
     const timer = setTimeout(() => {
-      void checkDirectory(target).then((result) => {
+      // The desktop asks Rust, which writes a probe file. A browser has no
+      // such reach, so it asks the service's listing endpoint instead - which
+      // knows the same three things about a folder it owns.
+      const asked = capabilities.localFilesystem
+        ? checkDirectory(target)
+        : (client?.checkFolder(target) ?? Promise.resolve(null))
+
+      void asked.then((result) => {
         if (live && result) {
           setCheck({ path: target, result })
         }
@@ -120,7 +129,7 @@ export function FolderField({
       live = false
       clearTimeout(timer)
     }
-  }, [target])
+  }, [target, client])
 
   // Keyed by the path it describes, so a slow answer about a path that has
   // since been edited is never shown against the new one.
@@ -182,7 +191,15 @@ export function FolderField({
               : "There is nothing to open yet"
           }
           aria-label="Open this folder"
-          onClick={() => void openPath(target)}
+          onClick={() => {
+            if (capabilities.revealInFileManager) {
+              void openPath(target)
+
+              return
+            }
+            // No shell to hand it to; show it in the app's own browser.
+            fileBrowser.browse()
+          }}
         >
           <RiExternalLinkLine />
         </Button>

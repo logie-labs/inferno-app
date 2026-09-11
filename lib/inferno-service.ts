@@ -836,6 +836,73 @@ export class InfernoClient {
     return this.href(`/api/v1/files/thumbnail?${query}`)
   }
 
+  /**
+   * The browser's answer to `checkDirectory`, which is a Tauri command.
+   *
+   * Without this the field asking "does this folder exist" sat on "Checking…"
+   * for ever in the container: the desktop call returns null there, and null
+   * was indistinguishable from "still waiting".
+   *
+   * The listing endpoint already knows all three answers. A folder that lists
+   * exists; one that 404s does not, and whether its parent lists decides
+   * between "will be created" and "there is nowhere to put it"; anything the
+   * server refuses to resolve is outside the download folder and cannot be
+   * used whatever it is.
+   *
+   * No writability test, unlike the desktop's - the service owns this folder
+   * and writes into it, so the question does not arise the way it does for an
+   * arbitrary path on someone's own disk.
+   */
+  async checkFolder(path: string): Promise<DirectoryCheck> {
+    const trimmed = path.trim()
+    try {
+      await this.listFiles(trimmed)
+
+      return {
+        status: "ok",
+        message: "This folder is here.",
+        existing_parent: null,
+      }
+    } catch (cause) {
+      const code = cause instanceof InfernoError ? cause.code : ""
+
+      if (code === "file_not_found") {
+        const above = trimmed.replace(/[\/]+$/, "").split(/[\/]/)
+        above.pop()
+        const parent = above.join("/")
+        try {
+          await this.listFiles(parent)
+
+          return {
+            status: "will_create",
+            message: "This folder will be made when something is saved here.",
+            existing_parent: parent,
+          }
+        } catch {
+          return {
+            status: "no_parent",
+            message: "Nothing above this folder exists either.",
+            existing_parent: null,
+          }
+        }
+      }
+
+      if (code === "invalid_request") {
+        return {
+          status: "invalid",
+          message: "This is outside the folder the service can write to.",
+          existing_parent: null,
+        }
+      }
+
+      return {
+        status: "invalid",
+        message: describeError(cause),
+        existing_parent: null,
+      }
+    }
+  }
+
   listFiles(path = "") {
     const query = new URLSearchParams({ path })
 

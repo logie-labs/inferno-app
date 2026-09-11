@@ -28,6 +28,7 @@ import {
   type DirectoryCheck,
   type KnownFolder,
 } from "@/lib/inferno-service"
+import { capabilities } from "@/lib/deployment"
 import { cn } from "@/lib/utils"
 
 import { useInfernoService } from "@/components/sections/downloads/service-context"
@@ -69,6 +70,9 @@ const STATUS_TONE: Record<DirectoryCheck["status"], string> = {
  * component re-renders on every progress frame while a download runs.
  */
 function useDirectoryChecks(paths: readonly string[]) {
+  // Needed for the browser branch below, where the answer comes from the
+  // service rather than from Rust.
+  const { client } = useInfernoService()
   // Joined on NUL, not a space: `C:\Users\me\My Folder` is an ordinary
   // path, and splitting that on spaces would probe three folders that do
   // not exist. NUL is the one byte a path cannot contain.
@@ -85,7 +89,19 @@ function useDirectoryChecks(paths: readonly string[]) {
     let live = true
 
     void Promise.all(
-      wanted.map(async (path) => [path, await checkDirectory(path)] as const)
+      wanted.map(
+        async (path) =>
+          [
+            path,
+            // Same split as `FolderField`: the desktop asks Rust, the browser
+            // asks the service. Without the second branch every row here sat
+            // on "Checking…" for ever in the container, because the Tauri call
+            // answers null there and null reads as "still waiting".
+            capabilities.localFilesystem
+              ? await checkDirectory(path)
+              : ((await client?.checkFolder(path)) ?? null),
+          ] as const
+      )
     ).then((answers) => {
       if (!live) {
         return
@@ -103,7 +119,7 @@ function useDirectoryChecks(paths: readonly string[]) {
     return () => {
       live = false
     }
-  }, [key])
+  }, [key, client])
 
   return checks
 }
@@ -260,6 +276,12 @@ export function SaveLocations({
   const [draft, setDraft] = useState("")
 
   useEffect(() => {
+    // Documents, Videos, Music and so on are the *user's* folders, which a
+    // browser cannot see and a server does not have. Asking would return
+    // nothing, so the list simply stays empty and its menu is not offered.
+    if (!capabilities.localFilesystem) {
+      return
+    }
     void knownFolders().then(setKnown)
   }, [])
 
