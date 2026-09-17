@@ -89,6 +89,7 @@ import {
   type FileListing,
   type InfernoClient,
 } from "@/lib/inferno-service"
+import { useLingering } from "@/lib/use-lingering"
 import { cn } from "@/lib/utils"
 
 import { useInfernoService } from "./service-context"
@@ -2025,19 +2026,14 @@ export function FileBrowserProvider({
 
       {/* Siblings of the browser rather than children of it: both portal to
           the body, and the browser stays open behind whichever is asking. */}
-      {naming ? (
-        <NameDialog
-          // A new question is a new instance, so the field starts from the
-          // right value without an effect writing into the previous one.
-          key={`${naming.title}:${naming.initial}`}
-          request={naming}
-          onOpenChange={(open) => {
-            if (!open) {
-              setNaming(null)
-            }
-          }}
-        />
-      ) : null}
+      <NameDialog
+        request={naming}
+        onOpenChange={(open) => {
+          if (!open) {
+            setNaming(null)
+          }
+        }}
+      />
       <ConfirmDialog
         request={confirm}
         onOpenChange={(open) => {
@@ -2082,12 +2078,43 @@ function NameDialog({
   request,
   onOpenChange,
 }: {
+  request: NameRequest | null
+  onOpenChange: (open: boolean) => void
+}) {
+  // Held so the content survives its own exit animation, the same way every
+  // other dialog here does it.
+  const shown = useLingering(request)
+
+  return (
+    // Mounted whether or not there is a question, with only the content
+    // conditional. Rendering the root only once there was one meant it
+    // appeared with `open` already true, which is not a change from closed and
+    // so had no enter transition to run - the first opening simply appeared.
+    <Dialog open={request !== null} onOpenChange={onOpenChange}>
+      {shown ? (
+        <NameForm
+          // A new question is a new instance, so the field starts from the
+          // right value without an effect writing into the previous one. The
+          // key is on the form rather than the dialog, so remounting it does
+          // not take the root - and the animation - with it.
+          key={`${shown.title}:${shown.initial}`}
+          request={shown}
+          onOpenChange={onOpenChange}
+        />
+      ) : null}
+    </Dialog>
+  )
+}
+
+/** The inside of `NameDialog`, remounted per question so the field resets. */
+function NameForm({
+  request,
+  onOpenChange,
+}: {
   request: NameRequest
   onOpenChange: (open: boolean) => void
 }) {
-  // Seeded once, on mount. The caller keys this component on the request, so a
-  // new question is a new instance rather than an effect writing state into the
-  // old one - which is the same reset, done where React can see it.
+  // Seeded once, on mount - see the key on this component.
   const [value, setValue] = useState(request.initial)
   const fieldRef = useRef<HTMLInputElement>(null)
 
@@ -2106,8 +2133,7 @@ function NameDialog({
   const effective = trimmed || request.fallback || ""
 
   return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-sm">
+    <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>{request.title}</DialogTitle>
         </DialogHeader>
@@ -2151,9 +2177,8 @@ function NameDialog({
               {request.confirmLabel}
             </Button>
           </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+      </form>
+    </DialogContent>
   )
 }
 

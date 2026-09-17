@@ -275,8 +275,13 @@ export function VideoDetailsDialog({
   // dialog before it had a chance to animate out.
   const shown = useLingering(video)
 
+  // A closed dialog rather than nothing, so the root exists from the first
+  // render. Returning null until there was something to show meant it mounted
+  // with `open` already true, which is not a change from closed and so had no
+  // enter transition - the first opening appeared fully formed, and every one
+  // after animated, because `useLingering` keeps this mounted from then on.
   if (!shown) {
-    return null
+    return <Dialog open={false} onOpenChange={onOpenChange} />
   }
 
   const facts = videoFacts(shown)

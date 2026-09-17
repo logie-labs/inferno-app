@@ -61,16 +61,22 @@ export function ConfirmDialog({
   // long as the dialog is still on screen animating away.
   const shown = useLingering(request)
 
-  if (!shown) {
-    return null
-  }
-
   return (
     // `open` is derived rather than hardcoded: a dialog that is only ever
     // `open` cannot animate closed, it can only be removed.
+    //
+    // The root is mounted whether or not there is anything to ask, and only
+    // the content is conditional. Returning null until the first request
+    // instead - which this did - meant the root mounted with `open` already
+    // true, so the first opening was not a change from closed and had no
+    // enter transition to run. It appeared fully formed, then animated
+    // properly every time after, because `useLingering` keeps the component
+    // mounted from then on. That is the "sometimes" in "sometimes it does not
+    // animate": it was always the first time.
     <Dialog open={request !== null} onOpenChange={onOpenChange}>
       {/* No corner close: Cancel says the same thing, and two ways to decline
           sitting next to each other read as two different outcomes. */}
+      {shown ? (
       <DialogContent showCloseButton={false} className="*:min-w-0 sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-base normal-case">
@@ -101,6 +107,7 @@ export function ConfirmDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+      ) : null}
     </Dialog>
   )
 }

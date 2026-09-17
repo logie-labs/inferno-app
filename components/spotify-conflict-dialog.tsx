@@ -82,8 +82,15 @@ export function SpotifyConflictDialog() {
 
   const shown = useLingering(question)
 
+  // A closed dialog rather than nothing, so the root exists from the first
+  // render. Returning null until there was something to show meant it mounted
+  // with `open` already true, which is not a change from closed and so had no
+  // enter transition - the first opening appeared fully formed, and every one
+  // after animated, because `useLingering` keeps this mounted from then on.
   if (!shown) {
-    return null
+    // Nothing to skip yet, so the handler this takes when open is not
+    // needed - only the mounted, closed root is.
+    return <Dialog open={false} />
   }
 
   return (

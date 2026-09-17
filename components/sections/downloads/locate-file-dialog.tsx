@@ -89,8 +89,13 @@ export function LocateFileDialog({
   // Held on to across the close, so the dialog can fade rather than vanish.
   const shown = useLingering(entry)
 
+  // A closed dialog rather than nothing, so the root exists from the first
+  // render. Returning null until there was something to show meant it mounted
+  // with `open` already true, which is not a change from closed and so had no
+  // enter transition - the first opening appeared fully formed, and every one
+  // after animated, because `useLingering` keeps this mounted from then on.
   if (!shown) {
-    return null
+    return <Dialog open={false} onOpenChange={onOpenChange} />
   }
 
   const name = shown.file_name ?? shown.title ?? "This download"

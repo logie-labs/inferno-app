@@ -143,8 +143,13 @@ export function SpotifyTracksDialog({
 
   const shown = useLingering(folder)
 
+  // A closed dialog rather than nothing, so the root exists from the first
+  // render. Returning null until there was something to show meant it mounted
+  // with `open` already true, which is not a change from closed and so had no
+  // enter transition - the first opening appeared fully formed, and every one
+  // after animated, because `useLingering` keeps this mounted from then on.
   if (!shown) {
-    return null
+    return <Dialog open={false} onOpenChange={onOpenChange} />
   }
 
   // Only this folder's own results; anything else is the last one still on
