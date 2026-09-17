@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Literal
 from urllib.parse import quote
@@ -42,7 +43,7 @@ from .config import (
 from .errors import CODE_FOR_STATUS, ErrorCode, ServiceError, error_envelope
 from .events import FIREHOSE, Event, EventBus, EventType, Subscription, job_channel
 from .extract import Extractor, InfoCache, validate_url
-from .jobs import JobManager
+from .jobs import JobManager, JobStatus
 from .schemas import (
     DownloadRequest,
     ErrorResponse,
@@ -320,6 +321,28 @@ def create_app(
         _install_web_root(application, web_root)
 
     return application
+
+
+def _library_kind(mime: str, name: str) -> str:
+    """The coarse bucket a file belongs in, for filtering.
+
+    Four buckets rather than a mime list because that is the granularity a
+    person filters at - "show me the music" - and because a mime is missing
+    often enough that the extension has to be able to answer on its own.
+    """
+    for prefix, bucket in (("video/", "video"), ("audio/", "audio"), ("image/", "image")):
+        if mime.startswith(prefix):
+            return bucket
+
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if extension in {"mp4", "mkv", "webm", "mov", "avi", "m4v", "flv"}:
+        return "video"
+    if extension in {"mp3", "m4a", "opus", "ogg", "flac", "wav", "aac", "alac"}:
+        return "audio"
+    if extension in {"jpg", "jpeg", "png", "webp", "gif", "avif"}:
+        return "image"
+
+    return "other"
 
 
 def _web_root() -> Path | None:
@@ -908,6 +931,159 @@ def _install_routes(application: FastAPI) -> None:
                 ErrorCode.FILE_NOT_FOUND, "No such file.", detail={"path": path}
             )
         return _serve_file(target, request, mimetypes.guess_type(target.name)[0])
+
+    # --- the library -------------------------------------------------------
+    #
+    # Everything this service has ever finished, which is a different question
+    # from the queue's. The queue is what is happening; the library is what
+    # happened, and the two were the same list only because nothing was kept.
+    #
+    # There is no second store behind this: a finished job already records the
+    # url, the title, the files, their sizes and types, and when it finished,
+    # and `STATE_FILE` already keeps that across restarts. A library table
+    # would be those same rows written twice and kept in step by hand.
+
+    def _library_rows(ctx: ServiceContext) -> list[dict[str, Any]]:
+        """Finished downloads, newest first, one row per file that was kept.
+
+        Per *file* rather than per job: a job that wrote a video and a subtitle
+        track produced two things somebody might later look for, and a library
+        that can only answer "which job" is a worse index than one that can
+        answer "which file".
+        """
+        root = ctx.settings.resolved_download_dir()
+        rows: list[dict[str, Any]] = []
+
+        for job in ctx.jobs:
+            if job.status != JobStatus.COMPLETED:
+                continue
+            video = job.video or {}
+            for entry in job.files:
+                path = entry.get("path")
+                if not path:
+                    continue
+                folder = str(Path(path).parent)
+                try:
+                    relative = Path(folder).relative_to(root).as_posix()
+                except ValueError:
+                    relative = ""
+                mime = entry.get("mime") or ""
+                rows.append(
+                    {
+                        "job_id": job.job_id,
+                        "url": job.url,
+                        "name": entry.get("name"),
+                        "path": path,
+                        "folder": folder,
+                        # Relative as well as absolute: the browser addresses
+                        # folders one way and the desktop the other, and which
+                        # one is wanted is the client's business, not this
+                        # row's.
+                        "folder_relative": "" if folder == str(root) else relative,
+                        "size": entry.get("size"),
+                        "mime": mime or None,
+                        "kind": _library_kind(mime, entry.get("name") or ""),
+                        "exists": entry.get("exists"),
+                        "finished_at": job.finished_at,
+                        "title": video.get("title") or entry.get("name"),
+                        "uploader": video.get("uploader") or video.get("channel"),
+                        "duration": video.get("duration"),
+                        "thumbnail": video.get("thumbnail"),
+                        "mode": (job.resolution.summary or {}).get("mode"),
+                    }
+                )
+
+        rows.sort(key=lambda row: row.get("finished_at") or 0, reverse=True)
+
+        return rows
+
+    @application.get(
+        "/api/v1/library",
+        dependencies=guarded,
+        responses=_ERROR_RESPONSES,
+        tags=["library"],
+        summary="Finished downloads, filtered, with the counts a filter UI needs",
+    )
+    async def library(
+        request: Request,
+        since: float | None = Query(None, description="Unix seconds, inclusive."),
+        until: float | None = Query(None, description="Unix seconds, inclusive."),
+        folder: str | None = Query(None, description="Absolute or root-relative."),
+        kind: str | None = Query(None, description="video, audio, image, other."),
+        q: str | None = Query(None, description="Matches title, file name or url."),
+        limit: int = Query(200, ge=1, le=2000),
+        offset: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        rows = _library_rows(_context(request))
+
+        needle = (q or "").strip().lower()
+
+        def matches(row: dict[str, Any], *, ignore: str = "") -> bool:
+            when = row.get("finished_at") or 0
+            if ignore != "date":
+                if since is not None and when < since:
+                    return False
+                if until is not None and when > until:
+                    return False
+            if ignore != "folder" and folder:
+                wanted = folder.rstrip("/\\")
+                if row["folder"] != wanted and row["folder_relative"] != wanted:
+                    return False
+            if ignore != "kind" and kind and row["kind"] != kind:
+                return False
+            if needle:
+                haystack = " ".join(
+                    str(row.get(field) or "")
+                    for field in ("title", "name", "url", "uploader")
+                ).lower()
+                if needle not in haystack:
+                    return False
+
+            return True
+
+        selected = [row for row in rows if matches(row)]
+
+        # Each facet counts what would be there if *its own* filter were
+        # lifted, which is what makes a filter list usable: a folder showing
+        # "3" that becomes empty when clicked is worse than no number at all.
+        days: dict[str, int] = {}
+        for row in (r for r in rows if matches(r, ignore="date")):
+            when = row.get("finished_at")
+            if when:
+                day = datetime.fromtimestamp(when, tz=timezone.utc).astimezone()
+                days[day.strftime("%Y-%m-%d")] = (
+                    days.get(day.strftime("%Y-%m-%d"), 0) + 1
+                )
+
+        folders: dict[str, int] = {}
+        for row in (r for r in rows if matches(r, ignore="folder")):
+            folders[row["folder"]] = folders.get(row["folder"], 0) + 1
+
+        kinds: dict[str, int] = {}
+        for row in (r for r in rows if matches(r, ignore="kind")):
+            kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+
+        return {
+            "entries": selected[offset : offset + limit],
+            "count": len(selected[offset : offset + limit]),
+            "total": len(selected),
+            "facets": {
+                # Counted by local day, because "downloads on the 14th" means
+                # the user's 14th. The server's timezone is the one the
+                # container was given, which is the closest thing to it here.
+                "days": days,
+                "folders": [
+                    {"path": path, "count": count}
+                    for path, count in sorted(
+                        folders.items(), key=lambda item: -item[1]
+                    )
+                ],
+                "kinds": [
+                    {"kind": name, "count": count}
+                    for name, count in sorted(kinds.items(), key=lambda item: -item[1])
+                ],
+            },
+        }
 
     # --- video thumbnails --------------------------------------------------
     #

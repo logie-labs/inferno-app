@@ -95,6 +95,63 @@ export type ServiceFile = {
   exists?: boolean
 }
 
+/** One file this service has finished downloading, as the library lists it. */
+export type LibraryItem = {
+  job_id: string
+  url: string
+  name: string
+  /** Absolute, on the machine running the service. */
+  path: string
+  folder: string
+  /** The same folder relative to the download root; "" is the root itself. */
+  folder_relative: string
+  size?: number | null
+  mime?: string | null
+  /** The coarse bucket the filters work in. */
+  kind: "video" | "audio" | "image" | "other"
+  /** Whether it is still on disk, checked as the row is built. */
+  exists?: boolean
+  finished_at?: number | null
+  title?: string | null
+  uploader?: string | null
+  duration?: number | null
+  thumbnail?: string | null
+  mode?: string | null
+}
+
+/**
+ * The counts a filter UI needs to be usable.
+ *
+ * Each is computed with its own filter lifted, so a folder showing "3" still
+ * has three things in it when you click it - and the calendar goes on showing
+ * every day you could pick rather than only the days inside the range already
+ * chosen.
+ */
+export type LibraryFacets = {
+  /** Local calendar day (`YYYY-MM-DD`) to how many finished that day. */
+  days: Record<string, number>
+  folders: { path: string; count: number }[]
+  kinds: { kind: string; count: number }[]
+}
+
+export type LibraryPage = {
+  entries: LibraryItem[]
+  count: number
+  total: number
+  facets: LibraryFacets
+}
+
+export type LibraryQuery = {
+  /** Unix seconds, inclusive. */
+  since?: number | null
+  until?: number | null
+  folder?: string | null
+  kind?: string | null
+  q?: string | null
+  limit?: number
+  offset?: number
+}
+
 /** One row in a directory listing from `/api/v1/files`. */
 export type FileEntry = {
   name: string
@@ -901,6 +958,24 @@ export class InfernoClient {
         existing_parent: null,
       }
     }
+  }
+
+  /**
+   * Everything this service has finished, filtered.
+   *
+   * One request carries both the page and the counts the filter UI draws
+   * itself from - they are computed over the same rows, so asking separately
+   * would be two passes that could disagree.
+   */
+  library(query: LibraryQuery = {}) {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== null && value !== undefined && value !== "") {
+        search.set(key, String(value))
+      }
+    }
+
+    return this.request<LibraryPage>(`/api/v1/library?${search}`)
   }
 
   listFiles(path = "") {

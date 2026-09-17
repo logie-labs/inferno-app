@@ -34,6 +34,7 @@ import {
   type JobTracker,
 } from "@/lib/inferno-progress"
 import {
+  terminalStatuses,
   getServiceEndpoint,
   getServiceStatus,
   InfernoClient,
@@ -97,6 +98,40 @@ type ServiceContextValue = {
 }
 
 const ServiceContext = createContext<ServiceContextValue | null>(null)
+
+/**
+ * When this tab started, in unix seconds.
+ *
+ * The queue shows this session's work; the library shows everything. Before
+ * the service kept its history, those were the same list by accident - a
+ * restart emptied it. Now that a finished download survives, a queue seeded
+ * from the whole history would open on weeks of finished rows with nothing to
+ * do about any of them, which is the library's job and a poor greeting for a
+ * screen whose point is what is happening.
+ *
+ * A timestamp rather than a flag because it also settles the reconnect case:
+ * jobs from before this tab existed stay out whether they arrive from the
+ * first fetch, a replayed socket frame, or a re-read after a delete.
+ *
+ * Module scope, so it is the tab's start rather than a component's mount -
+ * remounting the provider must not empty the queue.
+ */
+const SESSION_STARTED_AT = Date.now() / 1000
+
+/**
+ * Is this job part of this session?
+ *
+ * Anything still running counts however old it is: a download this tab did not
+ * start but which is going on right now is exactly what the queue is for, and
+ * hiding it would leave the app apparently idle while the service works.
+ */
+function inThisSession(job: Job) {
+  if (!terminalStatuses.includes(job.status)) {
+    return true
+  }
+
+  return (job.created_at ?? 0) >= SESSION_STARTED_AT
+}
 
 /** Reconnect delay for the firehose. The service is local; be eager. */
 const RECONNECT_DELAY = 1500
@@ -344,7 +379,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
     }
     try {
       const listing = await client.listJobs()
-      for (const job of listing.jobs) {
+      for (const job of listing.jobs.filter(inThisSession)) {
         upsert(job)
       }
       publish()
@@ -523,7 +558,7 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
         if (reset) {
           trackers.current.clear()
         }
-        for (const job of listing.jobs) {
+        for (const job of listing.jobs.filter(inThisSession)) {
           upsert(job)
         }
         publish()
@@ -568,7 +603,11 @@ export function InfernoServiceProvider({ children }: { children: ReactNode }) {
           if (data.replay_truncated) {
             void sync(true)
           }
-          for (const job of (data.jobs as Job[] | undefined) ?? []) {
+          // The third way history arrives, and the easiest to forget: the
+          // socket's opening frame carries the same list the fetch does.
+          for (const job of ((data.jobs as Job[] | undefined) ?? []).filter(
+            inThisSession
+          )) {
             upsert(job)
           }
           publish()
