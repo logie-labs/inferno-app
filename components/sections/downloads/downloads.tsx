@@ -291,6 +291,26 @@ function DownloadsScreen() {
               // alongside as the placeholder rather than being folded into
               // the value.
               downloadDirectory={settings.downloads.location}
+              // One list, shown in two places rather than kept in two.
+              folders={settings.downloads.folders}
+              onAddFolder={(path) =>
+                updateSettings((current) =>
+                  current.downloads.folders.some(
+                    (folder) => folder.path === path
+                  )
+                    ? current
+                    : {
+                        ...current,
+                        downloads: {
+                          ...current.downloads,
+                          folders: [
+                            ...current.downloads.folders,
+                            { source: "custom", path },
+                          ],
+                        },
+                      }
+                )
+              }
               serviceDirectory={health?.download_dir ?? null}
               // Saved straight into settings, which is the same value the
               // Settings screen edits - two views of one setting, not two

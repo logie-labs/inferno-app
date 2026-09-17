@@ -15,7 +15,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
   checkDirectory,
-  openPath,
   pickDirectory,
   type DirectoryCheck,
 } from "@/lib/inferno-service"
@@ -64,6 +63,7 @@ const TONE: Record<
 export function FolderField({
   value,
   onValueChange,
+  onPicked,
   placeholder,
   fallback,
   emptyHint,
@@ -72,6 +72,15 @@ export function FolderField({
 }: {
   value: string
   onValueChange: (next: string) => void
+  /**
+   * What to do with a folder chosen from the picker, when that differs from
+   * typing one.
+   *
+   * Given where picking should *complete* an action - adding to a list, say -
+   * rather than fill the field and wait. Without it a picked folder is treated
+   * exactly like a typed one.
+   */
+  onPicked?: (next: string) => void
   placeholder?: string
   /**
    * The folder used when the field is left empty.
@@ -166,9 +175,20 @@ export function FolderField({
               : fileBrowser.pickFolder()
 
             void chosen.then((picked) => {
-              if (picked) {
-                onValueChange(picked)
+              if (!picked) {
+                return
               }
+              // Choosing a folder in a picker *is* the answer. Typing is the
+              // half-finished action that needs a second click to commit;
+              // having navigated to a folder and pressed the button that
+              // names it, being asked to press another one reads as the first
+              // press not having worked.
+              if (onPicked) {
+                onPicked(picked)
+
+                return
+              }
+              onValueChange(picked)
             })
           }}
         >
@@ -191,15 +211,9 @@ export function FolderField({
               : "There is nothing to open yet"
           }
           aria-label="Open this folder"
-          onClick={() => {
-            if (capabilities.revealInFileManager) {
-              void openPath(target)
-
-              return
-            }
-            // No shell to hand it to; show it in the app's own browser.
-            fileBrowser.browse()
-          }}
+          // The OS file manager or the app's browser, decided once in the
+          // file-browser context rather than here.
+          onClick={() => fileBrowser.openLocation(target)}
         >
           <RiExternalLinkLine />
         </Button>

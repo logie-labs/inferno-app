@@ -41,9 +41,7 @@ import { downloadFile, openFile, relativeToRoot } from "@/lib/file-actions"
 import {
   describeError,
   describeErrorBody,
-  openPath,
   openUrl,
-  revealPath,
   terminalStatuses,
   type VideoInfo,
 } from "@/lib/inferno-service"
@@ -401,18 +399,12 @@ function QueueRowItem({
       label: "Open file location",
       hint: location,
       icon: RiFolderOpenLine,
-      run: () => {
-        // The browser has no file manager to hand this to, so it gets the
-        // dialog instead - and needs no existence check first, because the
-        // listing is the check: a file that is gone simply is not in it.
-        if (capabilities.fileBrowser) {
-          fileBrowser.reveal(primary?.path ?? location)
-
-          return
-        }
-
-        void checkThenRun(() => void revealPath(location).catch(reportFailure))
-      },
+      // One call, whichever product this is: the OS file manager, or the
+      // app's own browser opened at that folder with the file selected.
+      run: () =>
+        void checkThenRun(() =>
+          fileBrowser.revealLocation(primary?.path ?? location)
+        ),
     })
     file.push({
       label: "Copy file location",
@@ -741,10 +733,10 @@ export function QueuePanel() {
         "retry-errors": current.retryErrors,
         "clear-finished": current.clearFinished,
         "open-folder": () => {
-          // In the container this is the whole point of the browser dialog,
-          // and it needs no path from /health to open - the API roots the
-          // listing at the download folder itself.
-          if (capabilities.fileBrowser) {
+          // The container needs no path to open its own browser - the API
+          // roots the listing at the download folder itself - while the
+          // desktop needs one to hand to the OS.
+          if (!capabilities.revealInFileManager) {
             panelFileBrowser.browse()
 
             return
@@ -756,7 +748,7 @@ export function QueuePanel() {
 
             return
           }
-          void openPath(folder).catch(reportFailure)
+          panelFileBrowser.openLocation(folder)
         },
       }
 

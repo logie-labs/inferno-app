@@ -454,6 +454,53 @@ export function createDefaultSettingsConfig() {
   return structuredClone(defaultSettingsConfig)
 }
 
+/**
+ * A destination for this session only, which is never written to storage.
+ *
+ * "Save it here, just this once" is a real thing to want and a bad thing to
+ * persist: the next download would quietly inherit a folder chosen for one
+ * file. Keeping it in module state rather than in the settings object is what
+ * makes that true by construction - `saveSettingsConfig` cannot write what it
+ * has never been given, so there is no ordering to get right and nothing to
+ * remember to strip before saving.
+ *
+ * Module state rather than React state because the code that reads it is not
+ * in the tree: `deliverToDestination` runs from the socket handler when a
+ * download finishes.
+ */
+let sessionDestination: string | null = null
+const sessionListeners = new Set<() => void>()
+
+export function getSessionDestination() {
+  return sessionDestination
+}
+
+export function setSessionDestination(path: string | null) {
+  const next = path?.trim() || null
+  if (next === sessionDestination) {
+    return
+  }
+  sessionDestination = next
+  for (const listener of sessionListeners) {
+    listener()
+  }
+}
+
+/** Reactive read, for the control that shows which destination is chosen. */
+export function useSessionDestination() {
+  return useSyncExternalStore(
+    (listener) => {
+      sessionListeners.add(listener)
+
+      return () => sessionListeners.delete(listener)
+    },
+    getSessionDestination,
+    // Nothing is chosen before the browser has run, and the server rendering
+    // this has no session to speak of.
+    () => null
+  )
+}
+
 export function loadSettingsConfig() {
   if (typeof window === "undefined") {
     return createDefaultSettingsConfig()

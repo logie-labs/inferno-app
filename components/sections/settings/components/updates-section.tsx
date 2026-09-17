@@ -40,7 +40,7 @@ import {
   RowContextMenu,
   type RowAction as MenuAction,
 } from "@/components/sections/downloads/row-menu"
-import { describeError, openUrl, revealPath } from "@/lib/inferno-service"
+import { describeError, openUrl } from "@/lib/inferno-service"
 import {
   checkForUpdates,
   componentsInGroup,
@@ -55,6 +55,7 @@ import {
   type UpdateReport,
   type UpdateState,
 } from "@/lib/updates"
+import { useFileBrowser } from "@/components/sections/downloads/file-browser-dialog"
 import { cn } from "@/lib/utils"
 
 import type { SettingsSectionComponentProps } from "../settings-config"
@@ -379,7 +380,15 @@ function RowBody({
  */
 function buildRowActions(
   report: ComponentReport,
-  preferences: UpdatePreferences
+  preferences: UpdatePreferences,
+  /**
+   * Show a path, however this product shows one.
+   *
+   * Passed in rather than reached for: this is a plain function, so it cannot
+   * read the file-browser context itself, and the point of that context is
+   * that nowhere has to decide between the OS and the app's own browser.
+   */
+  revealLocation: (path: string) => void
 ) {
   const groups: MenuAction[][] = [
     [
@@ -436,11 +445,9 @@ function buildRowActions(
               label: "Show in folder",
               hint: report.path,
               icon: RiFolderOpenLine,
-              run: () => {
-                void revealPath(report.path ?? "").catch((error: unknown) => {
-                  toast.error(describeError(error))
-                })
-              },
+              // The OS file manager on the desktop, the app's own browser in
+              // the container - decided once, in the file-browser context.
+              run: () => revealLocation(report.path ?? ""),
             },
           ]
         : []),
@@ -462,11 +469,12 @@ function ComponentRow({
   restoring?: boolean
   preferences: UpdatePreferences
 }) {
+  const fileBrowser = useFileBrowser()
   // Bound here so each handler closes over a string rather than a property
   // TypeScript cannot promise is still there when it runs.
   const releases = report.url
   const location = report.path
-  const groups = buildRowActions(report, preferences)
+  const groups = buildRowActions(report, preferences, fileBrowser.revealLocation)
 
   return (
     <RowContextMenu groups={groups}>
@@ -502,11 +510,7 @@ function ComponentRow({
             <RowAction
               label={`Show ${report.name} in the file manager`}
               icon={RiFolderOpenLine}
-              onClick={() => {
-                void revealPath(location).catch((error: unknown) => {
-                  toast.error(describeError(error))
-                })
-              }}
+              onClick={() => fileBrowser.revealLocation(location)}
             />
           ) : (
             // A placeholder, so the version column lines up down the list
@@ -543,8 +547,9 @@ function AppRow({
   restoring?: boolean
   preferences: UpdatePreferences
 }) {
+  const fileBrowser = useFileBrowser()
   const releases = report.url
-  const groups = buildRowActions(report, preferences)
+  const groups = buildRowActions(report, preferences, fileBrowser.revealLocation)
 
   return (
     <Dialog>

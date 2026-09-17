@@ -10,19 +10,23 @@ import {
 } from "@remixicon/react"
 import { toast } from "sonner"
 
+import {
+  ConfirmDialog,
+  type ConfirmRequest,
+} from "@/components/confirm-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { FolderField } from "@/components/ui/folder-field"
 import {
   checkDirectory,
   knownFolders,
-  openPath,
   type DirectoryCheck,
   type KnownFolder,
 } from "@/lib/inferno-service"
 import { capabilities } from "@/lib/deployment"
 import { cn } from "@/lib/utils"
 
+import { useFileBrowser } from "@/components/sections/downloads/file-browser-dialog"
 import { useInfernoService } from "@/components/sections/downloads/service-context"
 import type {
   DownloadFolder,
@@ -141,6 +145,7 @@ function FolderRow({
   note,
   onSelect,
   onRemove,
+  onOpen,
 }: {
   path: string
   label: string
@@ -150,6 +155,8 @@ function FolderRow({
   note?: string
   onSelect: () => void
   onRemove?: () => void
+  /** Show this folder - the OS file manager, or the app's own browser. */
+  onOpen: () => void
 }) {
   const usable =
     !check || check.status === "ok" || check.status === "will_create"
@@ -219,7 +226,7 @@ function FolderRow({
         disabled={check?.status !== "ok"}
         title={check?.status === "ok" ? `Open ${path}` : "It is not there yet"}
         aria-label={`Open ${path}`}
-        onClick={() => void openPath(path)}
+        onClick={onOpen}
       >
         <RiFolderOpenLine />
       </Button>
@@ -262,10 +269,12 @@ export function SaveLocations({
   // an empty setting resolves to. Read here rather than passed in so the rest
   // of the settings screen does not re-render with the job list.
   const { health } = useInfernoService()
+  const fileBrowser = useFileBrowser()
   const fallback = health?.download_dir ?? null
 
   const [known, setKnown] = useState<KnownFolder[]>([])
   const [draft, setDraft] = useState("")
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
 
   useEffect(() => {
     // Documents, Videos, Music and so on are the *user's* folders, which a
@@ -333,6 +342,29 @@ export function SaveLocations({
     }
   }
 
+  /**
+   * Ask first.
+   *
+   * The button is a small × beside a row, sitting next to the one that selects
+   * it, and the list is not long enough for a mis-click to be obvious
+   * afterwards - particularly on the row in use, where removing it silently
+   * changes where the next download goes.
+   *
+   * The folder itself is untouched either way, which the question says,
+   * because "remove" next to a file path reads like deletion.
+   */
+  const askToRemove = (path: string) =>
+    setConfirm({
+      title: `Remove ${folderName(path)}?`,
+      description:
+        active === path
+          ? "It comes off this list, and downloads go back to the service's own folder until you choose another. The folder and everything in it is left alone."
+          : "It comes off this list. The folder and everything in it is left alone.",
+      confirmLabel: "Remove",
+      destructive: true,
+      run: () => remove(path),
+    })
+
   // Only the presets not already on the list: adding one twice does nothing,
   // so offering it twice is offering a control that cannot work.
 
@@ -349,6 +381,7 @@ export function SaveLocations({
           label="App default"
           active={!active}
           check={checks[fallback]}
+          onOpen={() => fileBrowser.openLocation(fallback)}
           onSelect={() => choose("")}
         />
       ) : null}
@@ -389,7 +422,8 @@ export function SaveLocations({
               : undefined
           }
           onSelect={() => choose(folder.path)}
-          onRemove={() => remove(folder.path)}
+          onRemove={() => askToRemove(folder.path)}
+          onOpen={() => fileBrowser.openLocation(folder.path)}
         />
       ))}
 
@@ -402,6 +436,13 @@ export function SaveLocations({
         <FolderField
           value={draft}
           onValueChange={setDraft}
+          // Picking one adds it. The field and the Add button are still there
+          // for a path being typed or pasted, which is the case that is not
+          // finished until it is confirmed.
+          onPicked={(path) => {
+            setDraft("")
+            add({ source: "custom", path })
+          }}
           placeholder="Add another folder"
           emptyHint="Type a path or choose a folder, then add it to the list."
           className="min-w-0 flex-1"
@@ -419,6 +460,15 @@ export function SaveLocations({
           Add
         </Button>
       </div>
+
+      <ConfirmDialog
+        request={confirm}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirm(null)
+          }
+        }}
+      />
     </div>
   )
 }

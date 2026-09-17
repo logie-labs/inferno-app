@@ -13,7 +13,10 @@ import {
 
 import { toast } from "sonner"
 
-import { loadSettingsConfig } from "@/components/sections/settings/settings-config"
+import {
+  getSessionDestination,
+  loadSettingsConfig,
+} from "@/components/sections/settings/settings-config"
 import { deliverToFolders, isSpotifyCompatible } from "@/lib/spotify"
 import {
   deleteEntry,
@@ -120,7 +123,11 @@ async function deliverToDestination(job: Job, ask: boolean) {
 
   // Read here rather than closed over: this runs from the socket handler,
   // which is subscribed once for the life of the provider.
-  const saved = loadSettingsConfig().downloads.location.trim()
+  //
+  // A destination chosen "just this once" wins over the stored one and is
+  // never written to it - see `setSessionDestination`.
+  const saved =
+    getSessionDestination() ?? loadSettingsConfig().downloads.location.trim()
 
   // Asked for at the moment it matters, which is now - the file exists, so a
   // folder chosen here is a folder something can actually be put in.

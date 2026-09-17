@@ -83,6 +83,8 @@ import { downloadFile, openFile, parentOf } from "@/lib/file-actions"
 import { formatBytes } from "@/lib/format"
 import {
   describeError,
+  openPath,
+  revealPath,
   type FileEntry,
   type FileListing,
   type InfernoClient,
@@ -139,6 +141,25 @@ type FileBrowserValue = {
   /** Open at a file's folder, with that file selected. */
   reveal: (path: string) => void
   /**
+   * "Show me where this is", whichever product is asking.
+   *
+   * The desktop hands the path to the OS file manager, which opens the folder
+   * and highlights the file. The container opens this browser at that folder
+   * with the file selected - the nearest honest equivalent.
+   *
+   * Here rather than at each call site because every screen wants the same
+   * thing and none of them should have to know which mechanism they are on:
+   * before this, "open file location" was written three times and worked in
+   * the container none of them.
+   */
+  revealLocation: (path: string) => void
+  /**
+   * "Open this folder", whichever product is asking.
+   *
+   * The OS file manager, or this browser navigated to it.
+   */
+  openLocation: (path: string) => void
+  /**
    * Open as a folder picker, resolving with an absolute path or null.
    *
    * The browser's answer to the native directory dialog the desktop opens.
@@ -162,11 +183,19 @@ const FileBrowserContext = createContext<FileBrowserValue | null>(null)
  * object literal per call would change those on every render and re-run the
  * effects holding it - in the build where the feature does not exist at all.
  */
+/**
+ * The value when there is no provider above, which should not happen.
+ *
+ * The provider is mounted at the root of the app and now supplies a value on
+ * both products, so this is a guard rather than the desktop's implementation -
+ * it used to be the latter, which is why reveal and open had to be written
+ * again at every call site.
+ */
 const NO_BROWSER: FileBrowserValue = {
   browse: () => {},
   reveal: () => {},
-  // The desktop opens the OS picker instead, so nothing here should be
-  // waiting on this one.
+  revealLocation: () => {},
+  openLocation: () => {},
   pickFolder: async () => null,
 }
 
@@ -484,6 +513,33 @@ export function FileBrowserProvider({
       reveal: (path: string) => {
         setPicking(false)
         navigate(parentOf(path), baseName(path))
+      },
+      // One name, two mechanisms, chosen here so no screen has to.
+      revealLocation: (path: string) => {
+        if (capabilities.revealInFileManager) {
+          void revealPath(path).catch((cause: unknown) =>
+            toast.error("Could not show it", {
+              description: describeError(cause),
+            })
+          )
+
+          return
+        }
+        setPicking(false)
+        navigate(parentOf(path), baseName(path))
+      },
+      openLocation: (path: string) => {
+        if (capabilities.revealInFileManager) {
+          void openPath(path).catch((cause: unknown) =>
+            toast.error("Could not open it", {
+              description: describeError(cause),
+            })
+          )
+
+          return
+        }
+        setPicking(false)
+        navigate(path, null)
       },
       pickFolder: (startAt?: string) =>
         new Promise<string | null>((resolve) => {
@@ -900,9 +956,16 @@ export function FileBrowserProvider({
     window.addEventListener("mouseup", onUp)
   }
 
-  // The desktop has a real file manager; this would be a worse version of it.
+  // The desktop has a real file manager, so the dialog is not built there -
+  // but the context still is. `revealLocation` and `openLocation` mean
+  // something on both products, and a screen calling them should not have to
+  // know which one it is on.
   if (!capabilities.fileBrowser) {
-    return <>{children}</>
+    return (
+      <FileBrowserContext.Provider value={value}>
+        {children}
+      </FileBrowserContext.Provider>
+    )
   }
 
   const openEntry = (entry: FileEntry) => {

@@ -24,6 +24,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { SaveToSelect } from "./save-to-select"
+import type { DownloadFolder } from "@/components/sections/settings/settings-config"
 import {
   Dialog,
   DialogContent,
@@ -32,7 +34,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { FolderField } from "@/components/ui/folder-field"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import {
@@ -305,8 +306,10 @@ export function ConfigurePanel({
   onOpenExpert,
   preview,
   downloadDirectory,
+  folders,
   serviceDirectory,
   onChangeDirectory,
+  onAddFolder,
 }: {
   options: DownloadOptions
   onOptionsChange: (options: DownloadOptions) => void
@@ -316,10 +319,14 @@ export function ConfigurePanel({
   /** Null until the service has said where it writes. */
   /** The app-side override, exactly as stored. Empty means the service's. */
   downloadDirectory: string
+  /** The saved locations, so this and the Settings screen show one list. */
+  folders: readonly DownloadFolder[]
   /** The service's own folder, shown as the placeholder. Null while unknown. */
   serviceDirectory: string | null
   /** Writes the app-side override; empty falls back to the service. */
   onChangeDirectory: (path: string) => void
+  /** Adds a path to the saved locations, so it is offered next time. */
+  onAddFolder: (path: string) => void
 }) {
   const spotify = useSettingsConfig().spotify
   // "Set up" means somewhere to put it. Without that the switch would be an
@@ -507,10 +514,16 @@ export function ConfigurePanel({
                   silently wrote the service's own path into the setting. Where
                   files go while it is empty is the placeholder's job, which is
                   what a placeholder is for. */}
-              <FolderField
+              {/* The same list the Settings screen keeps, not a copy: choosing
+                  here writes the same `downloads.location`, and adding here
+                  adds to the same `downloads.folders`. */}
+              <SaveToSelect
                 value={downloadDirectory}
+                folders={folders}
+                serviceDirectory={serviceDirectory}
                 onValueChange={onChangeDirectory}
-                fallback={serviceDirectory ?? undefined}
+                onAddFolder={onAddFolder}
+                disabled={spotifyMoves || options.askWhereToSave}
               />
             </div>
           </PanelSection>
